@@ -36,17 +36,20 @@ var (
 	AppArmorCacheDir          string
 	SnapAppArmorAdditionalDir string
 	SnapSeccompDir            string
+	SnapMountPolicyDir        string
 	SnapUdevRulesDir          string
 	LocaleDir                 string
 	SnapMetaDir               string
 	SnapdSocket               string
 
+	SnapSeedDir string
+
 	SnapAssertsDBDir      string
 	SnapTrustedAccountKey string
 
-	SnapStateFile string
+	SnapStateFile      string
+	SnapFirstBootStamp string
 
-	SnapEnvironmentDir  string
 	SnapBinariesDir     string
 	SnapServicesDir     string
 	SnapDesktopFilesDir string
@@ -84,6 +87,7 @@ func SetRootDir(rootdir string) {
 	AppArmorCacheDir = filepath.Join(rootdir, "/var/cache/apparmor")
 	SnapAppArmorAdditionalDir = filepath.Join(rootdir, snappyDir, "apparmor", "additional")
 	SnapSeccompDir = filepath.Join(rootdir, snappyDir, "seccomp", "profiles")
+	SnapMountPolicyDir = filepath.Join(rootdir, snappyDir, "mount")
 	SnapMetaDir = filepath.Join(rootdir, snappyDir, "meta")
 	SnapBlobDir = filepath.Join(rootdir, snappyDir, "snaps")
 	SnapDesktopFilesDir = filepath.Join(rootdir, snappyDir, "desktop", "applications")
@@ -91,9 +95,14 @@ func SetRootDir(rootdir string) {
 	SnapdSocket = filepath.Join(rootdir, "/run/snapd.socket")
 
 	SnapAssertsDBDir = filepath.Join(rootdir, snappyDir, "assertions")
-	SnapTrustedAccountKey = filepath.Join(rootdir, "/usr/share/snapd/trusted.acckey")
 
 	SnapStateFile = filepath.Join(rootdir, snappyDir, "state.json")
+
+	SnapSeedDir = filepath.Join(rootdir, snappyDir, "seed")
+
+	// NOTE: if you change stampFile, update the condition in
+	// snapd.firstboot.service to match
+	SnapFirstBootStamp = filepath.Join(rootdir, snappyDir, "firstboot", "stamp")
 
 	SnapBinariesDir = filepath.Join(SnapSnapsDir, "bin")
 	SnapServicesDir = filepath.Join(rootdir, "/etc/systemd/system")
@@ -105,7 +114,4 @@ func SetRootDir(rootdir string) {
 
 	LocaleDir = filepath.Join(rootdir, "/usr/share/locale")
 	ClassicDir = filepath.Join(rootdir, "/writable/classic")
-
-	// keep in sync with ubuntu-core-launcher
-	SnapEnvironmentDir = filepath.Join(rootdir, snappyDir, "environment")
 }

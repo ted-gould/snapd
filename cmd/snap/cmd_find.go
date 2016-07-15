@@ -22,7 +22,6 @@ package main
 import (
 	"fmt"
 	"sort"
-	"text/tabwriter"
 
 	"github.com/snapcore/snapd/client"
 	"github.com/snapcore/snapd/i18n"
@@ -35,10 +34,10 @@ var longFindHelp = i18n.G(`
 The find command queries the store for available packages.
 `)
 
-func getPrice(prices map[string]float64, currency string) string {
+func getPrice(prices map[string]float64, currency string) (float64, string, error) {
 	// If there are no prices, then the snap is free
 	if len(prices) == 0 {
-		return "-"
+		return 0, "", fmt.Errorf(i18n.G("snap is free"))
 	}
 
 	// Look up the price by currency code
@@ -61,7 +60,27 @@ func getPrice(prices map[string]float64, currency string) string {
 		}
 	}
 
+	return val, currency, nil
+}
+
+func formatPrice(val float64, currency string) string {
 	return fmt.Sprintf("%.2f%s", val, currency)
+}
+
+func getPriceString(prices map[string]float64, suggestedCurrency, status string) string {
+	price, currency, err := getPrice(prices, suggestedCurrency)
+
+	// If there are no prices, then the snap is free
+	if err != nil {
+		return ""
+	}
+
+	// If the snap is priced, but has been purchased
+	if status == "available" {
+		return i18n.G("bought")
+	}
+
+	return formatPrice(price, currency)
 }
 
 type cmdFind struct {
@@ -76,42 +95,25 @@ func init() {
 	})
 }
 
-func hasPrices(snaps []*client.Snap) bool {
-	for _, snap := range snaps {
-		if len(snap.Prices) > 0 {
-			return true
-		}
+func (x *cmdFind) Execute(args []string) error {
+	if len(args) > 0 {
+		return ErrExtraArgs
 	}
-	return false
+
+	return findSnaps(&client.FindOptions{
+		Query: x.Positional.Query,
+	})
 }
 
-func printWithPrices(w *tabwriter.Writer, snaps []*client.Snap, suggestedCurrency string) {
-	fmt.Fprintln(w, i18n.G("Name\tVersion\tPrice\tSummary"))
-
-	for _, snap := range snaps {
-		price := getPrice(snap.Prices, suggestedCurrency)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", snap.Name, snap.Version, price, snap.Summary)
-
-	}
-}
-
-func printNoPrices(w *tabwriter.Writer, snaps []*client.Snap) {
-	fmt.Fprintln(w, i18n.G("Name\tVersion\tSummary"))
-
-	for _, snap := range snaps {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", snap.Name, snap.Version, snap.Summary)
-	}
-}
-
-func (x *cmdFind) Execute([]string) error {
+func findSnaps(opts *client.FindOptions) error {
 	cli := Client()
-	snaps, resInfo, err := cli.FindSnaps(x.Positional.Query)
+	snaps, resInfo, err := cli.Find(opts)
 	if err != nil {
 		return err
 	}
 
 	if len(snaps) == 0 {
-		return fmt.Errorf("no snaps found for %q", x.Positional.Query)
+		return fmt.Errorf("no snaps found for %q", opts.Query)
 	}
 
 	sort.Sort(snapsByName(snaps))
@@ -119,10 +121,16 @@ func (x *cmdFind) Execute([]string) error {
 	w := tabWriter()
 	defer w.Flush()
 
-	if hasPrices(snaps) {
-		printWithPrices(w, snaps, resInfo.SuggestedCurrency)
-	} else {
-		printNoPrices(w, snaps)
+	fmt.Fprintln(w, i18n.G("Name\tVersion\tDeveloper\tNotes\tSummary"))
+
+	for _, snap := range snaps {
+		notes := &Notes{
+			Private: snap.Private,
+			DevMode: snap.Confinement != client.StrictConfinement,
+			Price:   getPriceString(snap.Prices, resInfo.SuggestedCurrency, snap.Status),
+		}
+		// TODO: get snap.Publisher, so we can only show snap.Developer if it's different
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", snap.Name, snap.Version, snap.Developer, notes, snap.Summary)
 	}
 
 	return nil

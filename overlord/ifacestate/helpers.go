@@ -24,11 +24,8 @@ import (
 	"strings"
 
 	"github.com/snapcore/snapd/interfaces"
-	"github.com/snapcore/snapd/interfaces/apparmor"
+	"github.com/snapcore/snapd/interfaces/backends"
 	"github.com/snapcore/snapd/interfaces/builtin"
-	"github.com/snapcore/snapd/interfaces/dbus"
-	"github.com/snapcore/snapd/interfaces/seccomp"
-	"github.com/snapcore/snapd/interfaces/udev"
 	"github.com/snapcore/snapd/logger"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
@@ -103,17 +100,13 @@ func (m *InterfaceManager) reloadConnections(snapName string) error {
 	return nil
 }
 
-func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, repo *interfaces.Repository) error {
+func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, devMode bool, repo *interfaces.Repository) error {
 	st := task.State()
-	var snapState snapstate.SnapState
 	snapName := snapInfo.Name()
-	if err := snapstate.Get(st, snapName, &snapState); err != nil {
-		task.Errorf("cannot get state of snap %q: %s", snapName, err)
-		return err
-	}
-	for _, backend := range securityBackends {
+
+	for _, backend := range backends.All {
 		st.Unlock()
-		err := backend.Setup(snapInfo, snapState.DevMode(), repo)
+		err := backend.Setup(snapInfo, devMode, repo)
 		st.Lock()
 		if err != nil {
 			task.Errorf("cannot setup %s for snap %q: %s", backend.Name(), snapName, err)
@@ -125,7 +118,7 @@ func setupSnapSecurity(task *state.Task, snapInfo *snap.Info, repo *interfaces.R
 
 func removeSnapSecurity(task *state.Task, snapName string) error {
 	st := task.State()
-	for _, backend := range securityBackends {
+	for _, backend := range backends.All {
 		st.Unlock()
 		err := backend.Remove(snapName)
 		st.Lock()
@@ -218,8 +211,4 @@ func getConns(st *state.State) (map[string]connState, error) {
 
 func setConns(st *state.State, conns map[string]connState) {
 	st.Set("conns", conns)
-}
-
-var securityBackends = []interfaces.SecurityBackend{
-	&apparmor.Backend{}, &seccomp.Backend{}, &dbus.Backend{}, &udev.Backend{},
 }

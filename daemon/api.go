@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	"github.com/snapcore/snapd/i18n"
 	"github.com/snapcore/snapd/interfaces"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/overlord/auth"
 	"github.com/snapcore/snapd/overlord/ifacestate"
 	"github.com/snapcore/snapd/overlord/snapstate"
@@ -47,7 +49,6 @@ import (
 	"github.com/snapcore/snapd/progress"
 	"github.com/snapcore/snapd/release"
 	"github.com/snapcore/snapd/snap"
-	"github.com/snapcore/snapd/snappy"
 	"github.com/snapcore/snapd/store"
 )
 
@@ -68,6 +69,9 @@ var api = []*Command{
 	eventsCmd,
 	stateChangeCmd,
 	stateChangesCmd,
+	createUserCmd,
+	buyCmd,
+	paymentMethodsCmd,
 }
 
 var (
@@ -165,6 +169,24 @@ var (
 		UserOK: true,
 		GET:    getChanges,
 	}
+
+	createUserCmd = &Command{
+		Path:   "/v2/create-user",
+		UserOK: false,
+		POST:   postCreateUser,
+	}
+
+	buyCmd = &Command{
+		Path:   "/v2/buy",
+		UserOK: false,
+		POST:   postBuy,
+	}
+
+	paymentMethodsCmd = &Command{
+		Path:   "/v2/buy/methods",
+		UserOK: false,
+		GET:    getPaymentMethods,
+	}
 )
 
 func tbd(c *Command, r *http.Request, user *auth.UserState) Response {
@@ -172,9 +194,11 @@ func tbd(c *Command, r *http.Request, user *auth.UserState) Response {
 }
 
 func sysInfo(c *Command, r *http.Request, user *auth.UserState) Response {
-	m := map[string]string{
-		"series":  release.Series,
-		"version": c.d.Version,
+	m := map[string]interface{}{
+		"series":     release.Series,
+		"version":    c.d.Version,
+		"os-release": release.ReleaseInfo,
+		"on-classic": release.OnClassic,
 	}
 
 	return SyncResponse(m, nil)
@@ -197,12 +221,18 @@ func loginUser(c *Command, r *http.Request, user *auth.UserState) Response {
 		return BadRequest("cannot decode login data from request body: %v", err)
 	}
 
-	macaroon, err := store.RequestPackageAccessMacaroon()
+	serializedMacaroon, err := store.RequestStoreMacaroon()
 	if err != nil {
 		return InternalError(err.Error())
 	}
+	macaroon, err := store.MacaroonDeserialize(serializedMacaroon)
 
-	discharge, err := store.DischargeAuthCaveat(loginData.Username, loginData.Password, macaroon, loginData.Otp)
+	// get SSO 3rd party caveat, and request discharge
+	loginCaveat, err := store.LoginCaveatID(macaroon)
+	if err != nil {
+		return InternalError(err.Error())
+	}
+	discharge, err := store.DischargeAuthCaveat(loginCaveat, loginData.Username, loginData.Password, loginData.Otp)
 	switch err {
 	case store.ErrAuthenticationNeeds2fa:
 		return SyncResponse(&resp{
@@ -231,14 +261,14 @@ func loginUser(c *Command, r *http.Request, user *auth.UserState) Response {
 	overlord := c.d.overlord
 	state := overlord.State()
 	state.Lock()
-	_, err = auth.NewUser(state, loginData.Username, macaroon, []string{discharge})
+	_, err = auth.NewUser(state, loginData.Username, serializedMacaroon, []string{discharge})
 	state.Unlock()
 	if err != nil {
 		return InternalError("cannot persist authentication details: %v", err)
 	}
 
 	result := loginResponseData{
-		Macaroon:   macaroon,
+		Macaroon:   serializedMacaroon,
 		Discharges: []string{discharge},
 	}
 	return SyncResponse(result, nil)
@@ -294,16 +324,6 @@ func UserFromRequest(st *state.State, req *http.Request) (*auth.UserState, error
 	return user, err
 }
 
-type metarepo interface {
-	Snap(string, string, store.Authenticator) (*snap.Info, error)
-	FindSnaps(string, string, store.Authenticator) ([]*snap.Info, error)
-	SuggestedCurrency() string
-}
-
-var newRemoteRepo = func() metarepo {
-	return snappy.NewConfiguredUbuntuStoreSnapRepository()
-}
-
 var muxVars = mux.Vars
 
 func getSnapInfo(c *Command, r *http.Request, user *auth.UserState) Response {
@@ -355,47 +375,45 @@ func webify(result map[string]interface{}, resource string) map[string]interface
 	return result
 }
 
+func getStore(c *Command) snapstate.StoreService {
+	st := c.d.overlord.State()
+	st.Lock()
+	defer st.Unlock()
+
+	return snapstate.Store(st)
+}
+
 func searchStore(c *Command, r *http.Request, user *auth.UserState) Response {
 	route := c.d.router.Get(snapCmd.Path)
 	if route == nil {
 		return InternalError("cannot find route for snaps")
 	}
-
 	query := r.URL.Query()
 
-	auther, err := c.d.auther(r)
-	if err != nil && err != auth.ErrInvalidAuth {
-		return InternalError("%v", err)
+	if query.Get("select") == "refresh" {
+		if query.Get("q") != "" {
+			return BadRequest("cannot use 'q' with 'select=refresh'")
+		}
+		return storeUpdates(c, r, user)
 	}
 
-	remoteRepo := newRemoteRepo()
-	found, err := remoteRepo.FindSnaps(query.Get("q"), query.Get("channel"), auther)
-	if err != nil {
+	theStore := getStore(c)
+	found, err := theStore.Find(query.Get("q"), query.Get("channel"), user)
+	switch err {
+	case nil:
+		// pass
+	case store.ErrEmptyQuery, store.ErrBadQuery, store.ErrBadPrefix:
+		return BadRequest("%v", err)
+	default:
 		return InternalError("%v", err)
 	}
 
 	meta := &Meta{
-		SuggestedCurrency: remoteRepo.SuggestedCurrency(),
+		SuggestedCurrency: theStore.SuggestedCurrency(),
 		Sources:           []string{"store"},
 	}
 
-	results := make([]*json.RawMessage, len(found))
-	for i, x := range found {
-		url, err := route.URL("name", x.Name())
-		if err != nil {
-			logger.Noticef("Cannot build URL for snap %q revision %s: %v", x.Name(), x.Revision, err)
-			continue
-		}
-
-		data, err := json.Marshal(webify(mapRemote(x), url.String()))
-		if err != nil {
-			return InternalError("%v", err)
-		}
-		raw := json.RawMessage(data)
-		results[i] = &raw
-	}
-
-	return SyncResponse(results, meta)
+	return sendStorePackages(route, meta, found)
 }
 
 func shouldSearchStore(r *http.Request) bool {
@@ -418,6 +436,72 @@ func shouldSearchStore(r *http.Request) bool {
 	}
 
 	return false
+}
+
+func storeUpdates(c *Command, r *http.Request, user *auth.UserState) Response {
+	route := c.d.router.Get(snapCmd.Path)
+	if route == nil {
+		return InternalError("cannot find route for snaps")
+	}
+
+	found, err := allLocalSnapInfos(c.d.overlord.State())
+	if err != nil {
+		return InternalError("cannot list local snaps: %v", err)
+	}
+
+	candidatesInfo := make([]*store.RefreshCandidate, 0, len(found))
+	for _, sn := range found {
+		// snaps in try mode are not considered here
+		if sn.snapst.TryMode() {
+			continue
+		}
+
+		// FIXME: snaps that are no active are skipped for now
+		//        until we know what we want to do
+		if !sn.snapst.Active {
+			continue
+		}
+
+		// get confinement preference from the snapstate
+		candidatesInfo = append(candidatesInfo, &store.RefreshCandidate{
+			// the desired channel (not sn.info.Channel!)
+			Channel: sn.snapst.Channel,
+			DevMode: sn.snapst.DevMode(),
+			Block:   sn.snapst.Block(),
+
+			SnapID:   sn.info.SnapID,
+			Revision: sn.info.Revision,
+			Epoch:    sn.info.Epoch,
+		})
+	}
+
+	store := getStore(c)
+	updates, err := store.ListRefresh(candidatesInfo, user)
+	if err != nil {
+		return InternalError("cannot list updates: %v", err)
+	}
+
+	return sendStorePackages(route, nil, updates)
+}
+
+func sendStorePackages(route *mux.Route, meta *Meta, found []*snap.Info) Response {
+	results := make([]*json.RawMessage, 0, len(found))
+	for _, x := range found {
+		url, err := route.URL("name", x.Name())
+		if err != nil {
+			logger.Noticef("Cannot build URL for snap %q revision %s: %v", x.Name(), x.Revision, err)
+			continue
+		}
+
+		data, err := json.Marshal(webify(mapRemote(x), url.String()))
+		if err != nil {
+			return InternalError("%v", err)
+		}
+		raw := json.RawMessage(data)
+		results = append(results, &raw)
+	}
+
+	return SyncResponse(results, meta)
 }
 
 // plural!
@@ -486,10 +570,13 @@ func (*licenseData) Error() string {
 
 type snapInstruction struct {
 	progress.NullProgress
-	Action   string       `json:"action"`
-	Channel  string       `json:"channel"`
-	DevMode  bool         `json:"devmode"`
-	LeaveOld bool         `json:"leave-old"`
+	Action   string `json:"action"`
+	Channel  string `json:"channel"`
+	DevMode  bool   `json:"devmode"`
+	JailMode bool   `json:"jailmode"`
+	// dropping support temporarely until flag confusion is sorted,
+	// this isn't supported by client atm anyway
+	LeaveOld bool         `json:"temp-dropped-leave-old"`
 	License  *licenseData `json:"license"`
 
 	// The fields below should not be unmarshalled into. Do not export them.
@@ -500,7 +587,14 @@ type snapInstruction struct {
 var snapstateInstall = snapstate.Install
 var snapstateUpdate = snapstate.Update
 var snapstateInstallPath = snapstate.InstallPath
+var snapstateTryPath = snapstate.TryPath
 var snapstateGet = snapstate.Get
+
+func ensureStateSoonImpl(st *state.State) {
+	st.EnsureBefore(0)
+}
+
+var ensureStateSoon = ensureStateSoonImpl
 
 var errNothingToInstall = errors.New("nothing to install")
 
@@ -541,13 +635,33 @@ func withEnsureUbuntuCore(st *state.State, targetSnap string, userID int, instal
 	return []*state.TaskSet{ts}, nil
 }
 
-func snapInstall(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
-	flags := snappy.DoInstallGC
-	if inst.LeaveOld {
-		flags = 0
+var errModeConflict = errors.New("cannot use devmode and jailmode flags together")
+var errNoJailMode = errors.New("this system cannot honour the jailmode flag")
+
+func modeFlags(devMode, jailMode bool) (snapstate.Flags, error) {
+	devModeOS := release.ReleaseInfo.ForceDevMode()
+	flags := snapstate.Flags(0)
+	if jailMode {
+		if devModeOS {
+			return 0, errNoJailMode
+		}
+		if devMode {
+			return 0, errModeConflict
+		}
+		flags |= snapstate.JailMode
 	}
-	if inst.DevMode {
-		flags |= snappy.DeveloperMode
+	if devMode || devModeOS {
+		flags |= snapstate.DevMode
+	}
+
+	return flags, nil
+
+}
+
+func snapInstall(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
+	flags, err := modeFlags(inst.DevMode, inst.JailMode)
+	if err != nil {
+		return "", nil, err
 	}
 
 	tsets, err := withEnsureUbuntuCore(st, inst.snap, inst.userID,
@@ -567,10 +681,7 @@ func snapInstall(inst *snapInstruction, st *state.State) (string, []*state.TaskS
 }
 
 func snapUpdate(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
-	flags := snappy.DoInstallGC
-	if inst.LeaveOld {
-		flags = 0
-	}
+	flags := snapstate.Flags(0)
 
 	ts, err := snapstateUpdate(st, inst.snap, inst.Channel, inst.userID, flags)
 	if err != nil {
@@ -586,11 +697,7 @@ func snapUpdate(inst *snapInstruction, st *state.State) (string, []*state.TaskSe
 }
 
 func snapRemove(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
-	flags := snappy.DoRemoveGC
-	if inst.LeaveOld {
-		flags = 0
-	}
-	ts, err := snapstate.Remove(st, inst.snap, flags)
+	ts, err := snapstate.Remove(st, inst.snap)
 	if err != nil {
 		return "", nil, err
 	}
@@ -599,25 +706,45 @@ func snapRemove(inst *snapInstruction, st *state.State) (string, []*state.TaskSe
 	return msg, []*state.TaskSet{ts}, nil
 }
 
-func snapRollback(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
-	// use previous version
-	ver := ""
-	ts, err := snapstate.Rollback(st, inst.snap, ver)
+func snapRevert(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
+	ts, err := snapstate.Revert(st, inst.snap)
 	if err != nil {
 		return "", nil, err
 	}
 
-	msg := fmt.Sprintf(i18n.G("Rollback %q snap"), inst.snap)
+	msg := fmt.Sprintf(i18n.G("Revert %q snap"), inst.snap)
+	return msg, []*state.TaskSet{ts}, nil
+}
+
+func snapEnable(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
+	ts, err := snapstate.Enable(st, inst.snap)
+	if err != nil {
+		return "", nil, err
+	}
+
+	msg := fmt.Sprintf(i18n.G("Enable %q snap"), inst.snap)
+	return msg, []*state.TaskSet{ts}, nil
+}
+
+func snapDisable(inst *snapInstruction, st *state.State) (string, []*state.TaskSet, error) {
+	ts, err := snapstate.Disable(st, inst.snap)
+	if err != nil {
+		return "", nil, err
+	}
+
+	msg := fmt.Sprintf(i18n.G("Disable %q snap"), inst.snap)
 	return msg, []*state.TaskSet{ts}, nil
 }
 
 type snapActionFunc func(*snapInstruction, *state.State) (string, []*state.TaskSet, error)
 
 var snapInstructionDispTable = map[string]snapActionFunc{
-	"install":  snapInstall,
-	"refresh":  snapUpdate,
-	"remove":   snapRemove,
-	"rollback": snapRollback,
+	"install": snapInstall,
+	"refresh": snapUpdate,
+	"remove":  snapRemove,
+	"revert":  snapRevert,
+	"enable":  snapEnable,
+	"disable": snapDisable,
 }
 
 func (inst *snapInstruction) dispatch() snapActionFunc {
@@ -657,22 +784,69 @@ func postSnap(c *Command, r *http.Request, user *auth.UserState) Response {
 		return InternalError("cannot %s %q: %v", inst.Action, inst.snap, err)
 	}
 
-	chg := newChange(state, inst.Action+"-snap", msg, tsets)
-	chg.Set("snap-names", []string{inst.snap})
-	state.EnsureBefore(0)
+	chg := newChange(state, inst.Action+"-snap", msg, tsets, []string{inst.snap})
+
+	ensureStateSoon(state)
 
 	return AsyncResponse(nil, &Meta{Change: chg.ID()})
 }
 
-func newChange(st *state.State, kind, summary string, tsets []*state.TaskSet) *state.Change {
+func newChange(st *state.State, kind, summary string, tsets []*state.TaskSet, snapNames []string) *state.Change {
 	chg := st.NewChange(kind, summary)
 	for _, ts := range tsets {
 		chg.AddAll(ts)
+	}
+	if snapNames != nil {
+		chg.Set("snap-names", snapNames)
 	}
 	return chg
 }
 
 const maxReadBuflen = 1024 * 1024
+
+func trySnap(c *Command, r *http.Request, user *auth.UserState, trydir string, flags snapstate.Flags) Response {
+	st := c.d.overlord.State()
+	st.Lock()
+	defer st.Unlock()
+
+	if !filepath.IsAbs(trydir) {
+		return BadRequest("cannot try %q: need an absolute path", trydir)
+	}
+	if !osutil.IsDirectory(trydir) {
+		return BadRequest("cannot try %q: not a snap directory", trydir)
+	}
+
+	info, err := readSnapInfo(trydir)
+	if err != nil {
+		return BadRequest("cannot read snap info for %s: %s", trydir, err)
+	}
+
+	tsets, err := snapstateTryPath(st, info.Name(), trydir, flags)
+	if err != nil {
+		return BadRequest("cannot try %s: %s", trydir, err)
+	}
+
+	msg := fmt.Sprintf(i18n.G("Try %q snap from %q"), info.Name(), trydir)
+	chg := newChange(st, "try-snap", msg, []*state.TaskSet{tsets}, []string{info.Name()})
+	chg.Set("api-data", map[string]string{"snap-name": info.Name()})
+
+	ensureStateSoon(st)
+
+	return AsyncResponse(nil, &Meta{Change: chg.ID()})
+}
+
+func isTrue(form *multipart.Form, key string) bool {
+	value := form.Value[key]
+	if len(value) == 0 {
+		return false
+	}
+	b, err := strconv.ParseBool(value[0])
+	if err != nil {
+		return false
+	}
+
+	return b
+}
 
 func sideloadSnap(c *Command, r *http.Request, user *auth.UserState) Response {
 	route := c.d.router.Get(stateChangeCmd.Path)
@@ -697,10 +871,16 @@ func sideloadSnap(c *Command, r *http.Request, user *auth.UserState) Response {
 		return BadRequest("cannot read POST form: %v", err)
 	}
 
-	var flags snappy.InstallFlags
+	flags, err := modeFlags(isTrue(form, "devmode"), isTrue(form, "jailmode"))
+	if err != nil {
+		return BadRequest(err.Error())
+	}
 
-	if len(form.Value["devmode"]) > 0 && form.Value["devmode"][0] == "true" {
-		flags |= snappy.DeveloperMode
+	if len(form.Value["action"]) > 0 && form.Value["action"][0] == "try" {
+		if len(form.Value["snap-path"]) == 0 {
+			return BadRequest("need 'snap-path' value in form")
+		}
+		return trySnap(c, r, user, form.Value["snap-path"][0], flags)
 	}
 
 	// find the file for the "snap" form field
@@ -774,17 +954,10 @@ out:
 		return InternalError("cannot install snap file: %v", err)
 	}
 
-	chg := newChange(st, "install-snap", msg, tsets)
+	chg := newChange(st, "install-snap", msg, tsets, []string{snapName})
 	chg.Set("api-data", map[string]string{"snap-name": snapName})
-	chg.Set("snap-names", []string{snapName})
 
-	go func() {
-		// XXX this needs to be a task in the manager; this is a hack to keep this branch smaller
-		<-chg.Ready()
-		os.Remove(tempPath)
-	}()
-
-	st.EnsureBefore(0)
+	ensureStateSoon(st)
 
 	return AsyncResponse(nil, &Meta{Change: chg.ID()})
 }
@@ -1140,7 +1313,108 @@ func abortChange(c *Command, r *http.Request, user *auth.UserState) Response {
 		return BadRequest("cannot abort change %s with nothing pending", chID)
 	}
 
+	// flag the change
 	chg.Abort()
 
+	// actually ask to proceed with the abort
+	ensureStateSoon(state)
+
 	return SyncResponse(change2changeInfo(chg), nil)
+}
+
+var (
+	postCreateUserUcrednetGetUID = ucrednetGetUID
+	storeUserInfo                = store.UserInfo
+	osutilAddExtraUser           = osutil.AddExtraUser
+)
+
+func postCreateUser(c *Command, r *http.Request, user *auth.UserState) Response {
+	uid, err := postCreateUserUcrednetGetUID(r.RemoteAddr)
+	if err != nil {
+		return BadRequest("cannot get ucrednet uid: %v", err)
+	}
+	if uid != 0 {
+		return BadRequest("cannot use create-user as non-root")
+	}
+
+	var createData struct {
+		EMail string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&createData); err != nil {
+		return BadRequest("cannot decode create-user data from request body: %v", err)
+	}
+
+	if createData.EMail == "" {
+		return BadRequest("cannot create user: 'email' field is empty")
+	}
+
+	v, err := storeUserInfo(createData.EMail)
+	if err != nil {
+		return BadRequest("cannot create user %q: %s", createData.EMail, err)
+	}
+
+	if err := osutilAddExtraUser(v.Username, v.SSHKeys); err != nil {
+		return BadRequest("cannot create user %s: %s", v.Username, err)
+	}
+
+	var createResponseData struct {
+		Username string `json:"username"`
+	}
+	createResponseData.Username = v.Username
+
+	return SyncResponse(createResponseData, nil)
+}
+
+type buyResponseData struct {
+	State string `json:"state,omitempty"`
+}
+
+func postBuy(c *Command, r *http.Request, user *auth.UserState) Response {
+	var opts store.BuyOptions
+
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&opts)
+	if err != nil {
+		return BadRequest("cannot decode buy options from request body: %v", err)
+	}
+
+	opts.User = user
+	s := getStore(c)
+
+	buyResult, err := s.Buy(&opts)
+
+	switch err {
+	default:
+		return InternalError("%v", err)
+	case store.ErrInvalidCredentials:
+		return Unauthorized(err.Error())
+	case nil:
+		// continue
+	}
+
+	// TODO: Support purchasing redirects
+	if buyResult.State == "InProgress" {
+		return InternalError("payment backend %q is not yet supported", opts.BackendID)
+	}
+
+	return SyncResponse(buyResponseData{State: buyResult.State}, nil)
+}
+
+func getPaymentMethods(c *Command, r *http.Request, user *auth.UserState) Response {
+	s := getStore(c)
+
+	paymentMethods, err := s.PaymentMethods(user)
+
+	switch err {
+	default:
+		return InternalError("%v", err)
+	case store.ErrInvalidCredentials:
+		return Unauthorized(err.Error())
+	case nil:
+		// continue
+	}
+
+	return SyncResponse(paymentMethods, nil)
 }

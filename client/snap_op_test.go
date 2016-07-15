@@ -23,8 +23,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"mime"
+	"mime/multipart"
 	"path/filepath"
+	"strconv"
 
 	"gopkg.in/check.v1"
 
@@ -40,6 +44,9 @@ var ops = []struct {
 	{(*client.Client).Install, "install"},
 	{(*client.Client).Refresh, "refresh"},
 	{(*client.Client).Remove, "remove"},
+	{(*client.Client).Revert, "revert"},
+	{(*client.Client).Enable, "enable"},
+	{(*client.Client).Disable, "disable"},
 }
 
 func (cs *clientSuite) TestClientOpSnapServerError(c *check.C) {
@@ -139,4 +146,55 @@ func (cs *clientSuite) TestClientOpInstallPath(c *check.C) {
 	c.Check(cs.req.URL.Path, check.Equals, fmt.Sprintf("/v2/snaps"))
 	c.Assert(cs.req.Header.Get("Content-Type"), check.Matches, "multipart/form-data; boundary=.*")
 	c.Check(id, check.Equals, "66b3")
+}
+
+func formToMap(c *check.C, mr *multipart.Reader) map[string]string {
+	formData := map[string]string{}
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		c.Assert(err, check.IsNil)
+		slurp, err := ioutil.ReadAll(p)
+		c.Assert(err, check.IsNil)
+		formData[p.FormName()] = string(slurp)
+	}
+	return formData
+}
+
+func (cs *clientSuite) TestClientOpTryMode(c *check.C) {
+	cs.rsp = `{
+		"change": "66b3",
+		"status-code": 202,
+		"type": "async"
+	}`
+	snapdir := filepath.Join(c.MkDir(), "/some/path")
+
+	for _, opts := range []*client.SnapOptions{
+		{DevMode: false, JailMode: false},
+		{DevMode: false, JailMode: true},
+		{DevMode: true, JailMode: true},
+		{DevMode: true, JailMode: false},
+	} {
+		id, err := cs.cli.Try(snapdir, opts)
+		c.Assert(err, check.IsNil)
+
+		// ensure we send the right form-data
+		_, params, err := mime.ParseMediaType(cs.req.Header.Get("Content-Type"))
+		c.Assert(err, check.IsNil)
+		mr := multipart.NewReader(cs.req.Body, params["boundary"])
+		formData := formToMap(c, mr)
+		c.Check(formData, check.DeepEquals, map[string]string{
+			"action":    "try",
+			"snap-path": snapdir,
+			"devmode":   strconv.FormatBool(opts.DevMode),
+			"jailmode":  strconv.FormatBool(opts.JailMode),
+		})
+
+		c.Check(cs.req.Method, check.Equals, "POST")
+		c.Check(cs.req.URL.Path, check.Equals, fmt.Sprintf("/v2/snaps"))
+		c.Assert(cs.req.Header.Get("Content-Type"), check.Matches, "multipart/form-data; boundary=.*")
+		c.Check(id, check.Equals, "66b3")
+	}
 }

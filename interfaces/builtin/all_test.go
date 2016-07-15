@@ -38,6 +38,7 @@ func (s *AllSuite) TestInterfaces(c *C) {
 	c.Check(all, Contains, &builtin.LocationObserveInterface{})
 	c.Check(all, DeepContains, builtin.NewApplicationLifecycleInterface())
 	c.Check(all, DeepContains, builtin.NewFirewallControlInterface())
+	c.Check(all, DeepContains, builtin.NewGsettingsInterface())
 	c.Check(all, DeepContains, builtin.NewHomeInterface())
 	c.Check(all, DeepContains, builtin.NewLocaleControlInterface())
 	c.Check(all, DeepContains, builtin.NewLogObserveInterface())
@@ -54,4 +55,7 @@ func (s *AllSuite) TestInterfaces(c *C) {
 	c.Check(all, DeepContains, builtin.NewX11Interface())
 	c.Check(all, DeepContains, builtin.NewOpenglInterface())
 	c.Check(all, DeepContains, builtin.NewPulseAudioInterface())
+	c.Check(all, DeepContains, builtin.NewCupsControlInterface())
+	c.Check(all, DeepContains, builtin.NewOpticalDriveInterface())
+	c.Check(all, DeepContains, builtin.NewCameraInterface())
 }

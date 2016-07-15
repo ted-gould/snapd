@@ -48,7 +48,7 @@ const modelExample = "type: model\n" +
 	"series: 16\n" +
 	"brand-id: brand-id1\n" +
 	"model: baz-3000\n" +
-	"os: core\n" +
+	"core: core\n" +
 	"architecture: amd64\n" +
 	"gadget: brand-gadget\n" +
 	"kernel: baz-linux\n" +
@@ -73,7 +73,7 @@ func (mods *modelSuite) TestDecodeOK(c *C) {
 	c.Check(model.BrandID(), Equals, "brand-id1")
 	c.Check(model.Model(), Equals, "baz-3000")
 	c.Check(model.Class(), Equals, "fixed")
-	c.Check(model.OS(), Equals, "core")
+	c.Check(model.Core(), Equals, "core")
 	c.Check(model.Architecture(), Equals, "amd64")
 	c.Check(model.Gadget(), Equals, "brand-gadget")
 	c.Check(model.Kernel(), Equals, "baz-linux")
@@ -97,8 +97,9 @@ func (mods *modelSuite) TestDecodeInvalid(c *C) {
 		{"brand-id: brand-id1\n", "brand-id: random\n", `authority-id and brand-id must match, model assertions are expected to be signed by the brand: "brand-id1" != "random"`},
 		{"model: baz-3000\n", "", `"model" header is mandatory`},
 		{"model: baz-3000\n", "model: \n", `"model" header should not be empty`},
-		{"os: core\n", "", `"os" header is mandatory`},
-		{"os: core\n", "os: \n", `"os" header should not be empty`},
+		{"model: baz-3000\n", "model: baz/3000\n", `"model" primary key header cannot contain '/'`},
+		{"core: core\n", "", `"core" header is mandatory`},
+		{"core: core\n", "core: \n", `"core" header should not be empty`},
 		{"architecture: amd64\n", "", `"architecture" header is mandatory`},
 		{"architecture: amd64\n", "architecture: \n", `"architecture" header should not be empty`},
 		{"gadget: brand-gadget\n", "", `"gadget" header is mandatory`},
@@ -129,11 +130,13 @@ func (mods *modelSuite) TestModelCheck(c *C) {
 	ex, err := asserts.Decode([]byte(strings.Replace(modelExample, "TSLINE", mods.tsLine, 1)))
 	c.Assert(err, IsNil)
 
-	signingKeyID, accSignDB, db := makeSignAndCheckDbWithAccountKey(c, "brand-id1")
+	storeDB, db := makeStoreAndCheckDB(c)
+	brandDB := setup3rdPartySigning(c, "brand1", storeDB, db)
 
 	headers := ex.Headers()
-	headers["timestamp"] = "2015-11-25T20:00:00Z"
-	model, err := accSignDB.Sign(asserts.ModelType, headers, nil, signingKeyID)
+	headers["brand-id"] = brandDB.AuthorityID
+	headers["timestamp"] = time.Now().Format(time.RFC3339)
+	model, err := brandDB.Sign(asserts.ModelType, headers, nil, "")
 	c.Assert(err, IsNil)
 
 	err = db.Check(model)
@@ -144,11 +147,13 @@ func (mods *modelSuite) TestModelCheckInconsistentTimestamp(c *C) {
 	ex, err := asserts.Decode([]byte(strings.Replace(modelExample, "TSLINE", mods.tsLine, 1)))
 	c.Assert(err, IsNil)
 
-	signingKeyID, accSignDB, db := makeSignAndCheckDbWithAccountKey(c, "brand-id1")
+	storeDB, db := makeStoreAndCheckDB(c)
+	brandDB := setup3rdPartySigning(c, "brand1", storeDB, db)
 
 	headers := ex.Headers()
+	headers["brand-id"] = brandDB.AuthorityID
 	headers["timestamp"] = "2011-01-01T14:00:00Z"
-	model, err := accSignDB.Sign(asserts.ModelType, headers, nil, signingKeyID)
+	model, err := brandDB.Sign(asserts.ModelType, headers, nil, "")
 	c.Assert(err, IsNil)
 
 	err = db.Check(model)
@@ -166,7 +171,7 @@ func (ss *serialSuite) SetUpSuite(c *C) {
 	ss.ts = time.Now().Truncate(time.Second).UTC()
 	ss.tsLine = "timestamp: " + ss.ts.Format(time.RFC3339) + "\n"
 
-	ss.deviceKey = asserts.OpenPGPPrivateKey(testPrivKey2)
+	ss.deviceKey = testPrivKey2
 	encodedPubKey, err := asserts.EncodePublicKey(ss.deviceKey.PublicKey())
 	c.Assert(err, IsNil)
 	ss.encodedDevKey = string(encodedPubKey)

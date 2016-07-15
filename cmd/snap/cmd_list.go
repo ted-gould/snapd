@@ -50,26 +50,46 @@ func (s snapsByName) Len() int           { return len(s) }
 func (s snapsByName) Less(i, j int) bool { return s[i].Name < s[j].Name }
 func (s snapsByName) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
-func (x *cmdList) Execute([]string) error {
+func (x *cmdList) Execute(args []string) error {
+	if len(args) > 0 {
+		return ErrExtraArgs
+	}
+
 	return listSnaps(x.Positional.Snaps)
 }
 
-func listSnaps(args []string) error {
+func listSnaps(names []string) error {
 	cli := Client()
-	snaps, err := cli.ListSnaps(args)
+	snaps, err := cli.List(names)
 	if err != nil {
 		return err
+	} else if len(snaps) == 0 {
+		fmt.Fprintln(Stderr, i18n.G("No snaps are installed yet. Try 'snap install hello-world'."))
+		return nil
 	}
-
 	sort.Sort(snapsByName(snaps))
 
 	w := tabWriter()
 	defer w.Flush()
 
-	fmt.Fprintln(w, i18n.G("Name\tVersion\tRev\tDeveloper"))
+	fmt.Fprintln(w, i18n.G("Name\tVersion\tRev\tDeveloper\tNotes"))
 
 	for _, snap := range snaps {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", snap.Name, snap.Version, snap.Revision, snap.Developer)
+		// TODO: make JailMode a flag in the snap itself
+		jailMode := snap.Confinement == client.DevmodeConfinement && !snap.DevMode
+		notes := &Notes{
+			Private:  snap.Private,
+			DevMode:  snap.DevMode,
+			JailMode: jailMode,
+			TryMode:  snap.TryMode,
+			// FIXME: a bit confusing, a installed snap
+			//        is either "active" or "installed", so
+			//        if it is not "active" it means it is
+			//        diabled.
+			Disabled: snap.Status == client.StatusInstalled,
+			Broken:   snap.Broken != "",
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", snap.Name, snap.Version, snap.Revision, snap.Developer, notes)
 	}
 
 	return nil

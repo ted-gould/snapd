@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/snapcore/snapd/dirs"
 	"github.com/snapcore/snapd/systemd"
@@ -41,6 +42,9 @@ type PlaceInfo interface {
 	// MountFile returns the path where the snap file that is mounted is installed.
 	MountFile() string
 
+	// HooksDir returns the directory containing the snap's hooks.
+	HooksDir() string
+
 	// DataDir returns the data directory of the snap.
 	DataDir() string
 
@@ -56,12 +60,22 @@ type PlaceInfo interface {
 
 // MinimalPlaceInfo returns a PlaceInfo with just the location information for a snap of the given name and revision.
 func MinimalPlaceInfo(name string, revision Revision) PlaceInfo {
-	return &Info{SideInfo: SideInfo{OfficialName: name, Revision: revision}}
+	return &Info{SideInfo: SideInfo{RealName: name, Revision: revision}}
 }
 
 // MountDir returns the base directory where it gets mounted of the snap with the given name and revision.
 func MountDir(name string, revision Revision) string {
 	return filepath.Join(dirs.SnapSnapsDir, name, revision.String())
+}
+
+// AppSecurityTag returns the application-specific security tag.
+func AppSecurityTag(snapName, appName string) string {
+	return fmt.Sprintf("snap.%s.%s", snapName, appName)
+}
+
+// HookSecurityTag returns the hook-specific security tag.
+func HookSecurityTag(snapName, hookName string) string {
+	return fmt.Sprintf("snap.%s.hook.%s", snapName, hookName)
 }
 
 // SideInfo holds snap metadata that is crucial for the tracking of
@@ -77,11 +91,12 @@ func MountDir(name string, revision Revision) string {
 // from the store but is not required for working offline should not
 // end up in SideInfo.
 type SideInfo struct {
-	OfficialName      string   `yaml:"name,omitempty" json:"name,omitempty"`
+	RealName          string   `yaml:"name,omitempty" json:"name,omitempty"`
 	SnapID            string   `yaml:"snap-id" json:"snap-id"`
 	Revision          Revision `yaml:"revision" json:"revision"`
 	Channel           string   `yaml:"channel,omitempty" json:"channel,omitempty"`
-	Developer         string   `yaml:"developer,omitempty" json:"developer,omitempty"`
+	DeveloperID       string   `yaml:"developer-id,omitempty" json:"developer-id,omitempty"`
+	Developer         string   `yaml:"developer,omitempty" json:"developer,omitempty"` // XXX: obsolete, will be retired after full backfilling of DeveloperID
 	EditedSummary     string   `yaml:"summary,omitempty" json:"summary,omitempty"`
 	EditedDescription string   `yaml:"description,omitempty" json:"description,omitempty"`
 	Size              int64    `yaml:"size,omitempty" json:"size,omitempty"`
@@ -107,6 +122,7 @@ type Info struct {
 	Epoch            string
 	Confinement      ConfinementType
 	Apps             map[string]*AppInfo
+	Hooks            map[string]*HookInfo
 	Plugs            map[string]*PlugInfo
 	Slots            map[string]*SlotInfo
 
@@ -114,18 +130,18 @@ type Info struct {
 	SideInfo
 
 	// The information in these fields is ephemeral, available only from the store.
-	AnonDownloadURL string
-	DownloadURL     string
+	DownloadInfo
 
 	IconURL string
 	Prices  map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 	MustBuy bool
+	Broken  string
 }
 
 // Name returns the blessed name for the snap.
 func (s *Info) Name() string {
-	if s.OfficialName != "" {
-		return s.OfficialName
+	if s.RealName != "" {
+		return s.RealName
 	}
 	return s.SuggestedName
 }
@@ -156,6 +172,11 @@ func (s *Info) MountFile() string {
 	return filepath.Join(dirs.SnapBlobDir, fmt.Sprintf("%s_%s.snap", s.Name(), s.Revision))
 }
 
+// HooksDir returns the directory containing the snap's hooks.
+func (s *Info) HooksDir() string {
+	return filepath.Join(s.MountDir(), "meta", "hooks")
+}
+
 // DataDir returns the data directory of the snap.
 func (s *Info) DataDir() string {
 	return filepath.Join(dirs.SnapDataDir, s.Name(), s.Revision.String())
@@ -176,7 +197,19 @@ func (s *Info) CommonDataHomeDir() string {
 	return filepath.Join(dirs.SnapDataHomeGlob, s.Name(), "common")
 }
 
-// sanity check that Info is a PlacInfo
+// NeedsDevMode retursn whether the snap needs devmode.
+func (s *Info) NeedsDevMode() bool {
+	return s.Confinement == DevmodeConfinement
+}
+
+// DownloadInfo contains the information to download a snap.
+// It can be marshalled.
+type DownloadInfo struct {
+	AnonDownloadURL string `json:"anon-download-url,omitempty"`
+	DownloadURL     string `json:"download-url,omitempty"`
+}
+
+// sanity check that Info is a PlaceInfo
 var _ PlaceInfo = (*Info)(nil)
 
 // PlugInfo provides information about a plug.
@@ -188,6 +221,7 @@ type PlugInfo struct {
 	Attrs     map[string]interface{}
 	Label     string
 	Apps      map[string]*AppInfo
+	Hooks     map[string]*HookInfo
 }
 
 // SlotInfo provides information about a slot.
@@ -225,6 +259,16 @@ type AppInfo struct {
 
 	Plugs map[string]*PlugInfo
 	Slots map[string]*SlotInfo
+
+	Environment map[string]string
+}
+
+// HookInfo provides information about a hook.
+type HookInfo struct {
+	Snap *Info
+
+	Name  string
+	Plugs map[string]*PlugInfo
 }
 
 // SecurityTag returns application-specific security tag.
@@ -232,11 +276,7 @@ type AppInfo struct {
 // Security tags are used by various security subsystems as "profile names" and
 // sometimes also as a part of the file name.
 func (app *AppInfo) SecurityTag() string {
-	return fmt.Sprintf("snap.%s.%s", app.Snap.Name(), app.Name)
-}
-
-func (app *AppInfo) EnvironmentFile() string {
-	return filepath.Join(dirs.SnapEnvironmentDir, app.SecurityTag())
+	return AppSecurityTag(app.Snap.Name(), app.Name)
 }
 
 // WrapperPath returns the path to wrapper invoking the app binary.
@@ -282,6 +322,46 @@ func (app *AppInfo) ServiceSocketFile() string {
 	return filepath.Join(dirs.SnapServicesDir, app.SecurityTag()+".socket")
 }
 
+func copyEnv(in map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range in {
+		out[k] = v
+	}
+
+	return out
+}
+
+// Env returns the app specific environment overrides
+func (app *AppInfo) Env() []string {
+	env := []string{}
+	appEnv := copyEnv(app.Snap.Environment)
+	for k, v := range app.Environment {
+		appEnv[k] = v
+	}
+	for k, v := range appEnv {
+		env = append(env, fmt.Sprintf("%s=%s\n", k, v))
+	}
+	return env
+}
+
+// SecurityTag returns the hook-specific security tag.
+//
+// Security tags are used by various security subsystems as "profile names" and
+// sometimes also as a part of the file name.
+func (hook *HookInfo) SecurityTag() string {
+	return HookSecurityTag(hook.Snap.Name(), hook.Name)
+}
+
+// Env returns the hook-specific environment overrides
+func (hook *HookInfo) Env() []string {
+	env := []string{}
+	hookEnv := copyEnv(hook.Snap.Environment)
+	for k, v := range hookEnv {
+		env = append(env, fmt.Sprintf("%s=%s\n", k, v))
+	}
+	return env
+}
+
 func infoFromSnapYamlWithSideInfo(meta []byte, si *SideInfo) (*Info, error) {
 	info, err := InfoFromSnapYaml(meta)
 	if err != nil {
@@ -295,23 +375,42 @@ func infoFromSnapYamlWithSideInfo(meta []byte, si *SideInfo) (*Info, error) {
 	return info, nil
 }
 
+type NotFoundError struct {
+	Snap     string
+	Revision Revision
+}
+
+func (e NotFoundError) Error() string {
+	return fmt.Sprintf("cannot find installed snap %q at revision %s", e.Snap, e.Revision)
+}
+
 // ReadInfo reads the snap information for the installed snap with the given name and given side-info.
 func ReadInfo(name string, si *SideInfo) (*Info, error) {
 	snapYamlFn := filepath.Join(MountDir(name, si.Revision), "meta", "snap.yaml")
 	meta, err := ioutil.ReadFile(snapYamlFn)
 	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("cannot find mounted snap %q at revision %s", name, si.Revision)
+		return nil, &NotFoundError{Snap: name, Revision: si.Revision}
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	return infoFromSnapYamlWithSideInfo(meta, si)
+	info, err := infoFromSnapYamlWithSideInfo(meta, si)
+	if err != nil {
+		return nil, err
+	}
+
+	err = addImplicitHooks(info)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 // ReadInfoFromSnapFile reads the snap information from the given File
 // and completes it with the given side-info if this is not nil.
-func ReadInfoFromSnapFile(snapf File, si *SideInfo) (*Info, error) {
+func ReadInfoFromSnapFile(snapf Container, si *SideInfo) (*Info, error) {
 	meta, err := snapf.ReadFile("meta/snap.yaml")
 	if err != nil {
 		return nil, err
@@ -322,10 +421,26 @@ func ReadInfoFromSnapFile(snapf File, si *SideInfo) (*Info, error) {
 		return nil, err
 	}
 
+	err = addImplicitHooksFromContainer(info, snapf)
+	if err != nil {
+		return nil, err
+	}
+
 	err = Validate(info)
 	if err != nil {
 		return nil, err
 	}
 
 	return info, nil
+}
+
+// SplitSnapApp will split a string of the form `snap.app` into
+// the `snap` and the `app` part. It also deals with the special
+// case of snapName == appName.
+func SplitSnapApp(snapApp string) (snap, app string) {
+	l := strings.SplitN(snapApp, ".", 2)
+	if len(l) < 2 {
+		return l[0], l[0]
+	}
+	return l[0], l[1]
 }

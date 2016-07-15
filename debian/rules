@@ -5,18 +5,31 @@
 export DH_OPTIONS
 export DH_GOPKG := github.com/snapcore/snapd
 #export DEB_BUILD_OPTIONS=nocheck
-export DH_GOLANG_EXCLUDES=integration-tests
+export DH_GOLANG_EXCLUDES=integration-tests tests
 export DH_GOLANG_GO_GENERATE=1
-
-# we need the builddir; is there a simpler way to get it?
-BUILDDIR:=${CURDIR}/obj-$(shell dpkg-architecture -qDEB_TARGET_GNU_TYPE)
 
 export PATH:=${PATH}:${CURDIR}
 
 RELEASE = $(shell lsb_release -c -s)
 
+TAGS=
+ifneq (,$(filter testkeys,$(DEB_BUILD_OPTIONS)))
+	TAGS=-tags withtestkeys
+endif
+
 %:
-	dh $@ --buildsystem=golang --with=golang --fail-missing --with systemd
+	dh $@ --buildsystem=golang --with=golang --fail-missing --with systemd --builddirectory=_build
+
+override_dh_auto_build:
+	dh_auto_build -- $(TAGS)
+
+override_dh_auto_test:
+	dh_auto_test
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	# check that only the main trusted account-key is included
+	[ $$(strings _build/bin/snapd|grep -c -E "public-key-id: [a-f0-9]{16}") -eq 1 ]
+	strings _build/bin/snapd|grep -c "^public-key-id: d4a55bea97d83720$$"
+endif
 
 override_dh_systemd_enable:
 	# enable boot-ok
@@ -27,38 +40,44 @@ override_dh_systemd_enable:
 	dh_systemd_enable \
 		-pubuntu-core-snapd-units \
 		snapd.firstboot.service
-	# we want the autopilot timer enabled by default
-#	dh_systemd_enable \
+	# we want the auto-update timer enabled by default
+	dh_systemd_enable \
 		-psnapd \
-		snappy-autopilot.timer
-	# but the autopilot service disabled
-#	dh_systemd_enable \
+		snapd.refresh.timer
+	# but the auto-update service disabled
+	dh_systemd_enable \
 		--no-enable \
 		-psnapd \
-		snappy-autopilot.service
+		snapd.refresh.service
 	# enable snapd
 	dh_systemd_enable \
 		-psnapd \
 		snapd.socket
+	dh_systemd_enable \
+		-psnapd \
+		snapd.service
 
 override_dh_systemd_start:
 	# start boot-ok
 	dh_systemd_start \
 		-pubuntu-core-snapd-units \
 		snapd.boot-ok.service
-	# we want to start the autopilot timer
-#	dh_systemd_start \
+	# we want to start the auto-update timer
+	dh_systemd_start \
 		-psnapd \
-		snappy-autopilot.timer
+		snapd.refresh.timer
 	# but not start the service
-#	dh_systemd_start \
+	dh_systemd_start \
 		--no-start \
 		-psnapd \
-		snappy-autopilot.service
+		snapd.refresh.service
 	# start snapd
 	dh_systemd_start \
 		-psnapd \
 		snapd.socket
+	dh_systemd_start \
+		-psnapd \
+		snapd.service
 
 override_dh_auto_install: snap.8
 	dh_auto_install -O--buildsystem=golang
@@ -72,7 +91,7 @@ override_dh_auto_install: snap.8
 	rm -f ${CURDIR}/debian/tmp/usr/bin/snappy
 
 snap.8:
-	${BUILDDIR}/bin/snap help --man > $@
+	$(CURDIR)/_build/bin/snap help --man > $@
 
 override_dh_auto_clean:
 	dh_auto_clean -O--buildsystem=golang

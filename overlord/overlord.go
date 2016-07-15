@@ -23,16 +23,19 @@ package overlord
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"gopkg.in/tomb.v2"
 
 	"github.com/snapcore/snapd/dirs"
+	"github.com/snapcore/snapd/logger"
 	"github.com/snapcore/snapd/osutil"
 
 	"github.com/snapcore/snapd/overlord/assertstate"
 	"github.com/snapcore/snapd/overlord/ifacestate"
+	"github.com/snapcore/snapd/overlord/patch"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
 )
@@ -54,6 +57,8 @@ type Overlord struct {
 	ensureTimer *time.Timer
 	ensureNext  time.Time
 	pruneTimer  *time.Timer
+	// restarts
+	restartHandler func()
 	// managers
 	snapMgr   *snapstate.SnapManager
 	assertMgr *assertstate.AssertManager
@@ -67,8 +72,9 @@ func New() (*Overlord, error) {
 	}
 
 	backend := &overlordStateBackend{
-		path:         dirs.SnapStateFile,
-		ensureBefore: o.ensureBefore,
+		path:           dirs.SnapStateFile,
+		ensureBefore:   o.ensureBefore,
+		requestRestart: o.requestRestart,
 	}
 	s, err := loadState(backend)
 	if err != nil {
@@ -103,16 +109,34 @@ func New() (*Overlord, error) {
 
 func loadState(backend state.Backend) (*state.State, error) {
 	if !osutil.FileExists(dirs.SnapStateFile) {
-		return state.New(backend), nil
+		// fail fast, mostly interesting for tests, this dir is setup
+		// by the snapd package
+		stateDir := filepath.Dir(dirs.SnapStateFile)
+		if !osutil.IsDirectory(stateDir) {
+			return nil, fmt.Errorf("fatal: directory %q must be present", stateDir)
+		}
+		s := state.New(backend)
+		patch.Init(s)
+		return s, nil
 	}
 
 	r, err := os.Open(dirs.SnapStateFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the state file: %s", err)
+		return nil, fmt.Errorf("cannot read the state file: %s", err)
 	}
 	defer r.Close()
 
-	return state.ReadState(backend, r)
+	s, err := state.ReadState(backend, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// one-shot migrations
+	err = patch.Apply(s)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (o *Overlord) ensureTimerSetup() {
@@ -146,11 +170,28 @@ func (o *Overlord) ensureBefore(d time.Duration) {
 	}
 }
 
+func (o *Overlord) requestRestart() {
+	if o.restartHandler == nil {
+		logger.Noticef("restart requested but no handler set")
+	} else {
+		o.restartHandler()
+	}
+}
+
+// SetRestartHandler sets a handler to fulfill restart requests asynchronously.
+func (o *Overlord) SetRestartHandler(handleRestart func()) {
+	o.restartHandler = handleRestart
+}
+
 // Loop runs a loop in a goroutine to ensure the current state regularly through StateEngine Ensure.
 func (o *Overlord) Loop() {
 	o.ensureTimerSetup()
 	o.loopTomb.Go(func() error {
 		for {
+			o.ensureTimerReset()
+			// in case of errors engine logs them,
+			// continue to the next Ensure() try for now
+			o.stateEng.Ensure()
 			select {
 			case <-o.loopTomb.Dying():
 				return nil
@@ -161,10 +202,6 @@ func (o *Overlord) Loop() {
 				st.Prune(pruneWait, abortWait)
 				st.Unlock()
 			}
-			o.ensureTimerReset()
-			// in case of errors engine logs them,
-			// continue to the next Ensure() try for now
-			o.stateEng.Ensure()
 		}
 	})
 }

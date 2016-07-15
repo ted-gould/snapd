@@ -20,6 +20,8 @@
 package snap_test
 
 import (
+	"regexp"
+
 	. "gopkg.in/check.v1"
 
 	. "github.com/snapcore/snapd/snap"
@@ -78,35 +80,82 @@ func (s *ValidateSuite) TestValidateEpoch(c *C) {
 	}
 }
 
+func (s *ValidateSuite) TestValidateHook(c *C) {
+	validHooks := []*HookInfo{
+		&HookInfo{Name: "a"},
+		&HookInfo{Name: "aaa"},
+		&HookInfo{Name: "a-a"},
+		&HookInfo{Name: "aa-a"},
+		&HookInfo{Name: "a-aa"},
+		&HookInfo{Name: "a-b-c"},
+	}
+	for _, hook := range validHooks {
+		err := ValidateHook(hook)
+		c.Assert(err, IsNil)
+	}
+	invalidHooks := []*HookInfo{
+		&HookInfo{Name: ""},
+		&HookInfo{Name: "a a"},
+		&HookInfo{Name: "a--a"},
+		&HookInfo{Name: "-a"},
+		&HookInfo{Name: "a-"},
+		&HookInfo{Name: "0"},
+		&HookInfo{Name: "123"},
+		&HookInfo{Name: "123abc"},
+		&HookInfo{Name: "日本語"},
+	}
+	for _, hook := range invalidHooks {
+		err := ValidateHook(hook)
+		c.Assert(err, ErrorMatches, `invalid hook name: ".*"`)
+	}
+}
+
 // ValidateApp
 
+func (s *ValidateSuite) TestValidateAppName(c *C) {
+	validAppNames := []string{
+		"1", "a", "aa", "aaa", "aaaa", "Aa", "aA", "1a", "a1", "1-a", "a-1",
+		"a-a", "aa-a", "a-aa", "a-b-c", "0a-a", "a-0a",
+	}
+	for _, name := range validAppNames {
+		c.Check(ValidateApp(&AppInfo{Name: name}), IsNil)
+	}
+	invalidAppNames := []string{
+		"", "-", "--", "a--a", "a-", "a ", " a", "a a", "日本語", "한글",
+		"ру́сский язы́к", "ໄຂ່​ອີ​ສ​ເຕີ້", ":a", "a:", "a:a", "_a", "a_", "a_a",
+	}
+	for _, name := range invalidAppNames {
+		err := ValidateApp(&AppInfo{Name: name})
+		c.Assert(err, ErrorMatches, `cannot have ".*" as app name.*`)
+	}
+}
+
 func (s *ValidateSuite) TestAppWhitelistSimple(c *C) {
-	c.Check(ValidateApp(&AppInfo{Name: "foo"}), IsNil)
-	c.Check(ValidateApp(&AppInfo{Command: "foo"}), IsNil)
-	c.Check(ValidateApp(&AppInfo{StopCommand: "foo"}), IsNil)
-	c.Check(ValidateApp(&AppInfo{PostStopCommand: "foo"}), IsNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", Command: "foo"}), IsNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", StopCommand: "foo"}), IsNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", PostStopCommand: "foo"}), IsNil)
 }
 
 func (s *ValidateSuite) TestAppWhitelistIllegal(c *C) {
 	c.Check(ValidateApp(&AppInfo{Name: "x\n"}), NotNil)
 	c.Check(ValidateApp(&AppInfo{Name: "test!me"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{Command: "foo\n"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{StopCommand: "foo\n"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{PostStopCommand: "foo\n"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{SocketMode: "foo\n"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{ListenStream: "foo\n"}), NotNil)
-	c.Check(ValidateApp(&AppInfo{BusName: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", Command: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", StopCommand: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", PostStopCommand: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", SocketMode: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", ListenStream: "foo\n"}), NotNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", BusName: "foo\n"}), NotNil)
 }
 
 func (s *ValidateSuite) TestAppDaemonValue(c *C) {
-	c.Check(ValidateApp(&AppInfo{Daemon: "oneshot"}), IsNil)
-	c.Check(ValidateApp(&AppInfo{Daemon: "nono"}), ErrorMatches, `"daemon" field contains invalid value "nono"`)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "oneshot"}), IsNil)
+	c.Check(ValidateApp(&AppInfo{Name: "foo", Daemon: "nono"}), ErrorMatches, `"daemon" field contains invalid value "nono"`)
 }
 
 func (s *ValidateSuite) TestAppWhitelistError(c *C) {
-	err := ValidateApp(&AppInfo{Name: "x\n"})
+	err := ValidateApp(&AppInfo{Name: "foo", Command: "x\n"})
 	c.Assert(err, NotNil)
-	c.Check(err.Error(), Equals, `app description field 'name' contains illegal "x\n" (legal: '^[A-Za-z0-9/. _#:-]*$')`)
+	c.Check(err.Error(), Equals, `app description field 'command' contains illegal "x\n" (legal: '^[A-Za-z0-9/. _#:-]*$')`)
 }
 
 // Validate
@@ -175,4 +224,20 @@ version: 1.0
 `))
 	c.Assert(err, IsNil)
 	c.Assert(Validate(info), IsNil)
+}
+
+func (s *ValidateSuite) TestIllegalHookName(c *C) {
+	hookType := NewHookType(regexp.MustCompile(".*"))
+	restore := MockSupportedHookTypes([]*HookType{hookType})
+	defer restore()
+
+	info, err := InfoFromSnapYaml([]byte(`name: foo
+version: 1.0
+hooks:
+  123abc:
+`))
+	c.Assert(err, IsNil)
+
+	err = Validate(info)
+	c.Check(err, ErrorMatches, `invalid hook name: "123abc"`)
 }

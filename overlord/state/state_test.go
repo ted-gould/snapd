@@ -134,9 +134,10 @@ func (ss *stateSuite) TestCache(c *C) {
 }
 
 type fakeStateBackend struct {
-	checkpoints  [][]byte
-	error        func() error
-	ensureBefore time.Duration
+	checkpoints      [][]byte
+	error            func() error
+	ensureBefore     time.Duration
+	restartRequested bool
 }
 
 func (b *fakeStateBackend) Checkpoint(data []byte) error {
@@ -149,6 +150,10 @@ func (b *fakeStateBackend) Checkpoint(data []byte) error {
 
 func (b *fakeStateBackend) EnsureBefore(d time.Duration) {
 	b.ensureBefore = d
+}
+
+func (b *fakeStateBackend) RequestRestart() {
+	b.restartRequested = true
 }
 
 func (ss *stateSuite) TestImplicitCheckpointAndRead(c *C) {
@@ -392,6 +397,8 @@ func (ss *stateSuite) TestNewTaskAndCheckpoint(c *C) {
 	chg.AddTask(t2)
 	t2ID := t2.ID()
 	t2.WaitFor(t1)
+	schedule := time.Now().Add(time.Hour)
+	t2.At(schedule)
 
 	// implicit checkpoint
 	st.Unlock()
@@ -443,6 +450,9 @@ func (ss *stateSuite) TestNewTaskAndCheckpoint(c *C) {
 		tasks2[t.ID()] = t
 	}
 	c.Assert(tasks2, HasLen, 2)
+
+	c.Check(task0_1.AtTime().IsZero(), Equals, true)
+	c.Check(task0_2.AtTime().Equal(schedule), Equals, true)
 }
 
 func (ss *stateSuite) TestEnsureBefore(c *C) {
@@ -636,4 +646,23 @@ func (ss *stateSuite) TestPrune(c *C) {
 	c.Assert(t4.Status(), Equals, state.DoStatus)
 
 	c.Check(st.NumTask(), Equals, 3)
+}
+
+func (ss *stateSuite) TestRequestRestart(c *C) {
+	b := new(fakeStateBackend)
+	st := state.New(b)
+
+	st.RequestRestart()
+
+	c.Check(b.restartRequested, Equals, true)
+}
+
+func (ss *stateSuite) TestReadStateInitsCache(c *C) {
+	st, err := state.ReadState(nil, bytes.NewBufferString("{}"))
+	c.Assert(err, IsNil)
+	st.Lock()
+	defer st.Unlock()
+
+	st.Cache("key", "value")
+	c.Assert(st.Cached("key"), Equals, "value")
 }

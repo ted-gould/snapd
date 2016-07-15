@@ -122,6 +122,7 @@ var defaultTemplate = []byte(`
   /{,usr/}bin/ln ixr,
   /{,usr/}bin/line ixr,
   /{,usr/}bin/link ixr,
+  /{,usr/}bin/locale ixr,
   /{,usr/}bin/logger ixr,
   /{,usr/}bin/ls ixr,
   /{,usr/}bin/md5sum ixr,
@@ -176,6 +177,11 @@ var defaultTemplate = []byte(`
   @{PROC}/uptime r,
   @{PROC}/loadavg r,
 
+  # lsb-release
+  /usr/bin/lsb_release ixr,
+  /usr/bin/ r,
+  /usr/share/distro-info/*.csv r,
+
   # Note: for now, don't explicitly deny this noisy denial so --devmode isn't
   # broken but eventually we may conditionally deny this since it is an
   # information leak.
@@ -191,6 +197,7 @@ var defaultTemplate = []byte(`
   /etc/lsb-release r,
   /sys/devices/**/read_ahead_kb r,
   /sys/devices/system/cpu/** r,
+  /sys/devices/system/node/node[0-9]*/* r,
   /sys/kernel/mm/transparent_hugepage/enabled r,
   /sys/kernel/mm/transparent_hugepage/defrag r,
   # NOTE: this leaks running process but java seems to want it (even though it
@@ -200,14 +207,21 @@ var defaultTemplate = []byte(`
   owner @{PROC}/@{pid}/cmdline r,
 
   # Miscellaneous accesses
+  /etc/machine-id r,
   /etc/mime.types r,
   @{PROC}/ r,
   /etc/{,writable/}hostname r,
   /etc/{,writable/}localtime r,
   /etc/{,writable/}timezone r,
+  @{PROC}/@{pid}/io r,
+  @{PROC}/@{pid}/smaps r,
   @{PROC}/@{pid}/stat r,
   @{PROC}/@{pid}/statm r,
   @{PROC}/@{pid}/status r,
+  @{PROC}/@{pid}/task/ r,
+  @{PROC}/@{pid}/task/[0-9]*/stat r,
+  @{PROC}/@{pid}/task/[0-9]*/statm r,
+  @{PROC}/@{pid}/task/[0-9]*/status r,
   @{PROC}/sys/kernel/hostname r,
   @{PROC}/sys/kernel/osrelease r,
   @{PROC}/sys/kernel/yama/ptrace_scope r,
@@ -215,6 +229,19 @@ var defaultTemplate = []byte(`
   @{PROC}/sys/fs/file-max r,
   @{PROC}/sys/kernel/pid_max r,
   @{PROC}/sys/kernel/random/uuid r,
+  /{,usr/}lib/ r,
+
+  # Reads of oom_adj and oom_score_adj are safe
+  owner @{PROC}/@{pid}/oom_{,score_}adj r,
+
+  # Note: for now, don't explicitly deny write access so --devmode isn't broken
+  # but eventually we may conditionally deny this since it allows the process
+  # to increase the oom heuristic of other processes (make them more likely to
+  # be killed). Once AppArmor kernel var is available to solve this properly,
+  # this can safely be allowed since non-root processes won't be able to
+  # decrease the value and root processes will only be able to with
+  # 'capability sys_resource,' which we deny be default.
+  # deny owner @{PROC}/@{pid}/oom_{,score_}adj w,
 
   # Eases hardware assignment (doesn't give anything away)
   /etc/udev/udev.conf r,

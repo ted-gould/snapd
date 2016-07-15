@@ -166,6 +166,7 @@ func (as *assertsSuite) TestDecodeInvalid(c *C) {
 		{"revision: 0\n", "revision: Z\n", `assertion: "revision" header is not an integer: Z`},
 		{"revision: 0\n", "revision: -10\n", "assertion: revision should be positive: -10"},
 		{"primary-key: abc\n", "", `assertion test-only: "primary-key" header is mandatory`},
+		{"primary-key: abc\n", "primary-key: a/c\n", `assertion test-only: "primary-key" primary key header cannot contain '/'`},
 	}
 
 	for _, test := range invalidAssertTests {
@@ -394,7 +395,7 @@ func (as *assertsSuite) TestSignFormatSanityEmptyBody(c *C) {
 		"authority-id": "auth-id1",
 		"primary-key":  "0",
 	}
-	a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, nil, asserts.OpenPGPPrivateKey(testPrivKey1))
+	a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, nil, testPrivKey1)
 	c.Assert(err, IsNil)
 
 	_, err = asserts.Decode(asserts.Encode(a))
@@ -407,7 +408,7 @@ func (as *assertsSuite) TestSignFormatSanityNonEmptyBody(c *C) {
 		"primary-key":  "0",
 	}
 	body := []byte("THE-BODY")
-	a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, body, asserts.OpenPGPPrivateKey(testPrivKey1))
+	a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, body, testPrivKey1)
 	c.Assert(err, IsNil)
 	c.Check(a.Body(), DeepEquals, body)
 
@@ -437,7 +438,7 @@ func (as *assertsSuite) TestSignFormatSanitySupportMultilineHeaderValues(c *C) {
 			headers["odd"] = "true"
 		}
 
-		a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, nil, asserts.OpenPGPPrivateKey(testPrivKey1))
+		a, err := asserts.AssembleAndSignInTest(asserts.TestOnlyType, headers, nil, testPrivKey1)
 		c.Assert(err, IsNil)
 
 		decoded, err := asserts.Decode(asserts.Encode(a))

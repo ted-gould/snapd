@@ -36,8 +36,9 @@ type taskRunnerSuite struct{}
 var _ = Suite(&taskRunnerSuite{})
 
 type stateBackend struct {
-	mu           sync.Mutex
-	ensureBefore time.Duration
+	mu               sync.Mutex
+	ensureBefore     time.Duration
+	ensureBeforeSeen chan<- bool
 }
 
 func (b *stateBackend) Checkpoint([]byte) error { return nil }
@@ -48,7 +49,12 @@ func (b *stateBackend) EnsureBefore(d time.Duration) {
 		b.ensureBefore = d
 	}
 	b.mu.Unlock()
+	if b.ensureBeforeSeen != nil {
+		b.ensureBeforeSeen <- true
+	}
 }
+
+func (b *stateBackend) RequestRestart() {}
 
 func ensureChange(c *C, r *state.TaskRunner, sb *stateBackend, chg *state.Change) {
 	for i := 0; i < 10; i++ {
@@ -117,7 +123,15 @@ var sequenceTests = []struct{ setup, result string }{{
 }, {
 	setup:  "t31:do-error t21:undo-error",
 	result: "t11:do t12:do t21:do t31:do t31:do-error t32:do t32:undo t21:undo t21:undo-error t11:undo",
-}}
+}, {
+	setup:  "t21:do-set-ready",
+	result: "t11:do t12:do t21:do t31:do t32:do",
+},
+	{
+		setup:  "t31:do-error t21:undo-set-ready",
+		result: "t11:do t12:do t21:do t31:do t31:do-error t32:do t32:undo t21:undo t11:undo",
+	},
+}
 
 func (ts *taskRunnerSuite) TestSequenceTests(c *C) {
 	sb := &stateBackend{}
@@ -142,11 +156,19 @@ func (ts *taskRunnerSuite) TestSequenceTests(c *C) {
 			if task.Get(label+"-retry", &isSet) == nil && isSet {
 				task.Set(label+"-retry", false)
 				ch <- task.Summary() + ":" + label + "-retry"
-				return state.Retry
+				return &state.Retry{}
 			}
 			if task.Get(label+"-error", &isSet) == nil && isSet {
 				ch <- task.Summary() + ":" + label + "-error"
 				return errors.New("boom")
+			}
+			if task.Get(label+"-set-ready", &isSet) == nil && isSet {
+				switch task.Status() {
+				case state.DoingStatus:
+					task.SetStatus(state.DoneStatus)
+				case state.UndoingStatus:
+					task.SetStatus(state.UndoneStatus)
+				}
 			}
 			return nil
 		}
@@ -327,4 +349,139 @@ func (ts *taskRunnerSuite) TestExternalAbort(c *C) {
 
 	// The Abort above must make Ensure kill the task, or this will never end.
 	ensureChange(c, r, sb, chg)
+}
+
+func (ts *taskRunnerSuite) TestStopHandlerJustFinishing(c *C) {
+	sb := &stateBackend{}
+	st := state.New(sb)
+	r := state.NewTaskRunner(st)
+	defer r.Stop()
+
+	ch := make(chan bool)
+	r.AddHandler("just-finish", func(t *state.Task, tb *tomb.Tomb) error {
+		ch <- true
+		<-tb.Dying()
+		// just ignore and actually finishes
+		return nil
+	}, nil)
+
+	st.Lock()
+	chg := st.NewChange("install", "...")
+	t := st.NewTask("just-finish", "...")
+	chg.AddTask(t)
+	st.Unlock()
+
+	r.Ensure()
+	<-ch
+	r.Stop()
+
+	st.Lock()
+	defer st.Unlock()
+	c.Check(t.Status(), Equals, state.DoneStatus)
+}
+
+func (ts *taskRunnerSuite) TestStopAskForRetry(c *C) {
+	sb := &stateBackend{}
+	st := state.New(sb)
+	r := state.NewTaskRunner(st)
+	defer r.Stop()
+
+	ch := make(chan bool)
+	r.AddHandler("ask-for-retry", func(t *state.Task, tb *tomb.Tomb) error {
+		ch <- true
+		<-tb.Dying()
+		// ask for retry
+		return &state.Retry{}
+	}, nil)
+
+	st.Lock()
+	chg := st.NewChange("install", "...")
+	t := st.NewTask("ask-for-retry", "...")
+	chg.AddTask(t)
+	st.Unlock()
+
+	r.Ensure()
+	<-ch
+	r.Stop()
+
+	st.Lock()
+	defer st.Unlock()
+	c.Check(t.Status(), Equals, state.DoingStatus)
+}
+
+func (ts *taskRunnerSuite) TestRetryAfterDuration(c *C) {
+	ensureBeforeTick := make(chan bool, 1)
+	sb := &stateBackend{
+		ensureBefore:     time.Hour,
+		ensureBeforeSeen: ensureBeforeTick,
+	}
+	st := state.New(sb)
+	r := state.NewTaskRunner(st)
+	defer r.Stop()
+
+	ch := make(chan bool)
+	ask := 0
+	r.AddHandler("ask-for-retry", func(t *state.Task, _ *tomb.Tomb) error {
+		ask++
+		if ask == 1 {
+			return &state.Retry{After: time.Minute}
+		}
+		ch <- true
+		return nil
+	}, nil)
+
+	st.Lock()
+	chg := st.NewChange("install", "...")
+	t := st.NewTask("ask-for-retry", "...")
+	chg.AddTask(t)
+	st.Unlock()
+
+	tock := time.Now()
+	restore := state.MockTime(tock)
+	defer restore()
+	r.Ensure() // will run and be rescheduled in a minute
+	select {
+	case <-ensureBeforeTick:
+	case <-time.After(2 * time.Second):
+		c.Fatal("EnsureBefore wasn't called")
+	}
+
+	st.Lock()
+	defer st.Unlock()
+	c.Check(t.Status(), Equals, state.DoingStatus)
+
+	c.Check(ask, Equals, 1)
+	c.Check(sb.ensureBefore, Equals, 1*time.Minute)
+	schedule := t.AtTime()
+	c.Check(schedule.IsZero(), Equals, false)
+
+	state.MockTime(tock.Add(5 * time.Second))
+	sb.ensureBefore = time.Hour
+	st.Unlock()
+	r.Ensure() // too soon
+	st.Lock()
+
+	c.Check(t.Status(), Equals, state.DoingStatus)
+	c.Check(ask, Equals, 1)
+	c.Check(sb.ensureBefore, Equals, 55*time.Second)
+	c.Check(t.AtTime().Equal(schedule), Equals, true)
+
+	state.MockTime(schedule)
+	sb.ensureBefore = time.Hour
+	st.Unlock()
+	r.Ensure() // time to run again
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		c.Fatal("handler wasn't called")
+	}
+
+	// wait for handler to finish
+	r.Wait()
+
+	st.Lock()
+	c.Check(t.Status(), Equals, state.DoneStatus)
+	c.Check(ask, Equals, 2)
+	c.Check(sb.ensureBefore, Equals, time.Hour)
+	c.Check(t.AtTime().IsZero(), Equals, true)
 }

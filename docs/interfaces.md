@@ -55,7 +55,7 @@ Auto-Connect: yes
 
 ### opengl
 
-Can access the opengl hardware. 
+Can access the opengl hardware.
 
 Usage: reserved
 Auto-Connect: yes
@@ -64,11 +64,56 @@ Auto-Connect: yes
 
 Can access non-hidden files in user's `$HOME` to read/write/lock.
 This is restricted because it gives file access to the user's
-`$HOME`.
+`$HOME`. This interface is auto-connected on classic systems and
+manually connected on non-classic.
 
 Usage: reserved
+Auto-Connect: yes
+
+### gsettings
+
+Can access global gsettings of the user's session. This is restricted because
+it gives privileged access to sensitive information stored in gsettings and
+allows adjusting settings of other applications.
+
+Usage: reserved
+Auto-Connect: yes
+
+### optical-drive
+
+Can access the first optical drive in read-only mode. Suitable for CD/DVD playback.
+
+Usage: common
+Auto-Connect: yes
+
+### mpris
+
+Can access media players implementing the Media Player Remote Interfacing
+Specification (mpris) when the interface is specified as a plug.
+
+Media players implementing mpris can be accessed by connected clients when
+specified as a slot.
+
+Usage: common
+Auto-Connect: no
+
+### camera
+
+Can access the first video camera. Suitable for programs wanting to use the
+webcams.
+
+Usage: common
+Auto-Connect: no
 
 ## Supported Interfaces - Advanced
+
+### cups-control
+
+Can access cups control socket. This is restricted because it provides
+privileged access to configure printing.
+
+Usage: reserved
+Auto-Connect: no
 
 ### firewall-control
 
@@ -76,18 +121,21 @@ Can configure firewall. This is restricted because it gives privileged access
 to networking and should only be used with trusted apps.
 
 Usage: reserved
+Auto-Connect: no
 
 ### locale-control
 
 Can manage locales directly separate from 'config ubuntu-core'.
 
 Usage: reserved
+Auto-Connect: no
 
 ### log-observe
 
 Can read system logs and set kernel log rate-limiting.
 
 Usage: reserved
+Auto-Connect: no
 
 ### mount-observe
 
@@ -96,6 +144,7 @@ privileged read access to mount arguments and should only be used with trusted
 apps.
 
 Usage: reserved
+Auto-Connect: no
 
 ### network-control
 
@@ -103,6 +152,7 @@ Can configure networking. This is restricted because it gives wide, privileged
 access to networking and should only be used with trusted apps.
 
 Usage: reserved
+Auto-Connect: no
 
 ### network-observe
 
@@ -111,12 +161,22 @@ privileged read-only access to networking information and should only be used
 with trusted apps.
 
 Usage: reserved
+Auto-Connect: no
+
+### serial-port
+
+Can access serial ports. This is restricted because it provides privileged
+access to configure serial port hardware.
+
+Usage: reserved
+Auto-Connect: no
 
 ### snapd-control
 
 Can manage snaps via snapd.
 
 Usage: reserved
+Auto-Connect: no
 
 ### system-observe
 
@@ -125,10 +185,11 @@ privileged read access to all processes on the system and should only be used
 with trusted apps.
 
 Usage: reserved
+Auto-Connect: no
 
 ### timeserver-control
 
 Can manage timeservers directly separate from config ubuntu-core.
 
 Usage: reserved
-
+Auto-Connect: no

@@ -65,12 +65,10 @@ func localSnapInfo(st *state.State, name string) (*snap.Info, *snapstate.SnapSta
 		return nil, nil, fmt.Errorf("cannot consult state: %v", err)
 	}
 
-	cur := snapst.Current()
-	if cur == nil {
+	info, err := snapst.CurrentInfo()
+	if err == snapstate.ErrNoCurrent {
 		return nil, nil, errNoSnap
 	}
-
-	info, err := snap.ReadInfo(name, cur)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read snap details: %v", err)
 	}
@@ -92,12 +90,11 @@ func allLocalSnapInfos(st *state.State) ([]aboutSnap, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	about := make([]aboutSnap, 0, len(snapStates))
 
 	var firstErr error
-	for name, snapState := range snapStates {
-		info, err := snap.ReadInfo(name, snapState.Current())
+	for _, snapState := range snapStates {
+		info, err := snapState.CurrentInfo()
 		if err != nil {
 			// XXX: aggregate instead?
 			if firstErr == nil {
@@ -111,10 +108,22 @@ func allLocalSnapInfos(st *state.State) ([]aboutSnap, error) {
 	return about, firstErr
 }
 
+// appJSON contains the json for snap.AppInfo
+type appJSON struct {
+	Name string `json:"name"`
+}
+
 func mapLocal(localSnap *snap.Info, snapst *snapstate.SnapState) map[string]interface{} {
 	status := "installed"
-	if snapst.Active {
+	if snapst.Active && localSnap.Revision == snapst.Current {
 		status = "active"
+	}
+
+	apps := make([]appJSON, 0, len(localSnap.Apps))
+	for _, app := range localSnap.Apps {
+		apps = append(apps, appJSON{
+			Name: app.Name,
+		})
 	}
 
 	return map[string]interface{}{
@@ -130,6 +139,13 @@ func mapLocal(localSnap *snap.Info, snapst *snapstate.SnapState) map[string]inte
 		"summary":        localSnap.Summary(),
 		"type":           string(localSnap.Type),
 		"version":        localSnap.Version,
+		"channel":        localSnap.Channel,
+		"confinement":    localSnap.Confinement,
+		"devmode":        snapst.DevMode(),
+		"trymode":        snapst.TryMode(),
+		"private":        localSnap.Private,
+		"apps":           apps,
+		"broken":         localSnap.Broken,
 	}
 }
 
@@ -137,6 +153,11 @@ func mapRemote(remoteSnap *snap.Info) map[string]interface{} {
 	status := "available"
 	if remoteSnap.MustBuy {
 		status = "priced"
+	}
+
+	confinement := remoteSnap.Confinement
+	if confinement == "" {
+		confinement = snap.StrictConfinement
 	}
 
 	result := map[string]interface{}{
@@ -151,6 +172,9 @@ func mapRemote(remoteSnap *snap.Info) map[string]interface{} {
 		"summary":       remoteSnap.Summary(),
 		"type":          string(remoteSnap.Type),
 		"version":       remoteSnap.Version,
+		"channel":       remoteSnap.Channel,
+		"private":       remoteSnap.Private,
+		"confinement":   confinement,
 	}
 
 	if len(remoteSnap.Prices) > 0 {

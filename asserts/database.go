@@ -70,12 +70,10 @@ type KeypairManager interface {
 	Get(authorityID, keyID string) (PrivateKey, error)
 }
 
-// TODO: for more flexibility plugging the keypair manager make PrivatKey private encoding methods optional, and add an explicit sign method.
-
 // DatabaseConfig for an assertion database.
 type DatabaseConfig struct {
-	// trusted account keys
-	TrustedKeys []*AccountKey
+	// trusted assertions (account and account-key supported)
+	Trusted []Assertion
 	// backstore for assertions, left unset storing assertions will error
 	Backstore Backstore
 	// manager/backstore for keypairs, mandatory
@@ -110,6 +108,8 @@ func (e *RevisionError) Error() string {
 
 // A RODatabase exposes read-only access to an assertion database.
 type RODatabase interface {
+	// IsTrustedAccount returns whether the account is part of the trusted set.
+	IsTrustedAccount(accountID string) bool
 	// Find an assertion based on arbitrary headers.
 	// Provided headers must contain the primary key for the assertion type.
 	// It returns ErrNotFound if the assertion cannot be found.
@@ -148,10 +148,23 @@ func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 
 	trustedBackstore := NewMemoryBackstore()
 
-	for _, accKey := range cfg.TrustedKeys {
-		err := trustedBackstore.Put(AccountKeyType, accKey)
-		if err != nil {
-			return nil, fmt.Errorf("error loading for use trusted account key %q for %q: %v", accKey.PublicKeyID(), accKey.AuthorityID(), err)
+	for _, a := range cfg.Trusted {
+		switch accepted := a.(type) {
+		case *AccountKey:
+			accKey := accepted
+			err := trustedBackstore.Put(AccountKeyType, accKey)
+			if err != nil {
+				return nil, fmt.Errorf("error loading for use trusted account key %q for %q: %v", accKey.PublicKeyID(), accKey.AccountID(), err)
+			}
+
+		case *Account:
+			acct := accepted
+			err := trustedBackstore.Put(AccountType, acct)
+			if err != nil {
+				return nil, fmt.Errorf("error loading for use trusted account %q: %v", acct.DisplayName(), err)
+			}
+		default:
+			return nil, fmt.Errorf("cannot load trusted assertions that are not account-key or account: %s", a.Type().Name)
 		}
 	}
 
@@ -172,25 +185,6 @@ func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 		backstores: []Backstore{trustedBackstore, bs},
 		checkers:   dbCheckers,
 	}, nil
-}
-
-// GenerateKey generates a private/public key pair for identity and
-// stores it returning its key id.
-func (db *Database) GenerateKey(authorityID string) (keyID string, err error) {
-	// TODO: optionally delegate the whole thing to the keypair mgr
-
-	// TODO: support specifying different key types/algorithms
-	privKey, err := generatePrivateKey()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate private key: %v", err)
-	}
-
-	pk := OpenPGPPrivateKey(privKey)
-	err = db.ImportKey(authorityID, pk)
-	if err != nil {
-		return "", err
-	}
-	return pk.PublicKey().ID(), nil
 }
 
 // ImportKey stores the given private/public key pair for identity.
@@ -250,6 +244,15 @@ func (db *Database) findAccountKey(authorityID, keyID string) (*AccountKey, erro
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// IsTrustedAccount returns whether the account is part of the trusted set.
+func (db *Database) IsTrustedAccount(accountID string) bool {
+	if accountID == "" {
+		return false
+	}
+	_, err := db.trusted.Get(AccountType, []string{accountID})
+	return err == nil
 }
 
 // Check tests whether the assertion is properly signed and consistent with all the stored knowledge.
@@ -427,10 +430,7 @@ type consistencyChecker interface {
 func CheckCrossConsistency(assert Assertion, signature Signature, signingKey *AccountKey, roDB RODatabase, checkTime time.Time) error {
 	// see if the assertion requires further checks
 	if checker, ok := assert.(consistencyChecker); ok {
-		err := checker.checkConsistency(roDB, signingKey)
-		if err != nil {
-			return fmt.Errorf("%s assertion violates other knowledge: %v", assert.Type().Name, err)
-		}
+		return checker.checkConsistency(roDB, signingKey)
 	}
 	return nil
 }

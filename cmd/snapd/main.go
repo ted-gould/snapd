@@ -28,6 +28,7 @@ import (
 	"github.com/snapcore/snapd/cmd"
 	"github.com/snapcore/snapd/daemon"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/store"
 )
 
 func init() {
@@ -38,6 +39,7 @@ func init() {
 }
 
 func main() {
+	cmd.ExecInCoreSnap()
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -45,6 +47,8 @@ func main() {
 }
 
 func run() error {
+	store.SetUserAgentFromVersion(cmd.Version)
+
 	d, err := daemon.New()
 	if err != nil {
 		return err
