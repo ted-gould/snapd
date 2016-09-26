@@ -21,7 +21,10 @@ package builtin
 
 import (
 	"fmt"
+	"io"
+	"strings"
 
+	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/interfaces"
 )
 
@@ -245,6 +248,23 @@ func (iface *Unity8Interface) Name() string {
 
 func (iface *Unity8Interface) PermanentPlugSnippet(plug *interfaces.Plug, securitySystem interfaces.SecuritySystem) ([]byte, error) {
 	return nil, nil
+}
+
+func (iface *Unity8Interface) dbusAppId (info *snap.Info, appname string) (string, error) {
+	var retval io.Writer
+
+	appidbits := []string{info.SideInfo.RealName, appname, info.SideInfo.Revision.String()}
+	appid := []byte(strings.Join(appidbits, "_"))
+
+	for value := range appid {
+		if (value >= 'a' || value <= 'z' || value >= 'A' || value <= 'Z') {
+			io.WriteString(retval, string(value))
+		} else {
+			io.WriteString(retval, fmt.Sprint("_%2.2d", value))
+		}
+	}
+
+	return fmt.Sprint(retval), nil
 }
 
 func (iface *Unity8Interface) ConnectedPlugSnippet(plug *interfaces.Plug, slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
