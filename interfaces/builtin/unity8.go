@@ -226,11 +226,10 @@ sendmsg
 socket
 `)
 
-/* TODO: Switch to putting the actual name of the snap there on connect */
 var unity8ConnectedSlotAppArmor = []byte(`
 dbus (receive, send)
-    bus=system
-    peer=(label=snap.*),
+    bus=session
+    peer=(label=###PLUG_SECURITY_TAGS###),
 `)
 
 var unity8SlotAppArmor = []byte(`
@@ -286,8 +285,6 @@ func (iface *Unity8Interface) ConnectedPlugSnippet(plug *interfaces.Plug, slot *
 
 func (iface *Unity8Interface) PermanentSlotSnippet(slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
 	switch securitySystem {
-	case interfaces.SecurityAppArmor:
-		return unity8SlotAppArmor, nil
 	case interfaces.SecuritySecComp:
 		return secCompDBus, nil
 	}
@@ -297,7 +294,9 @@ func (iface *Unity8Interface) PermanentSlotSnippet(slot *interfaces.Slot, securi
 func (iface *Unity8Interface) ConnectedSlotSnippet(plug *interfaces.Plug, slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
 	switch securitySystem {
 	case interfaces.SecurityAppArmor:
-		return unity8SlotAppArmor, nil
+		tag := []byte("###PLUG_SECURITY_TAG###")
+		value := plugAppLabelExpr(plug)
+		return bytes.Replace(unity8SlotAppArmor, tag, value, -1), nil
 	}
 	return nil, nil
 }
