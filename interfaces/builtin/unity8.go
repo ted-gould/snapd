@@ -20,6 +20,7 @@
 package builtin
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -119,7 +120,7 @@ var unity8ConnectedPlugAppArmor = []byte(`
   # we don't allow the send a malicious app can't send this to another app).
   dbus (receive)
        bus=session
-       path=/@{APP_ID_DBUS}
+       path=/###APP_ID_DBUS###
        interface="org.freedesktop.Application"
        member="Open"
        peer=(label=unconfined),
@@ -127,7 +128,7 @@ var unity8ConnectedPlugAppArmor = []byte(`
   # This is needed for apps to interact with the Launcher (eg, for the counter)
   dbus (receive, send)
        bus=session
-       path=/com/canonical/unity/launcher/@{APP_ID_DBUS}
+       path=/com/canonical/unity/launcher/###APP_ID_DBUS###
        peer=(label=unconfined),
 
   # Untrusted Helpers are 3rd party apps that run in a different confinement
@@ -140,7 +141,7 @@ var unity8ConnectedPlugAppArmor = []byte(`
   # LP: #1462492 - this rule is suboptimal and should not be needed once we
   # move to socket activation or FD passing
   dbus (receive, send)
-       path=/com/canonical/UbuntuAppLaunch/@{APP_ID_DBUS}/*
+       path=/com/canonical/UbuntuAppLaunch/###APP_ID_DBUS###/*
        interface="com.canonical.UbuntuAppLaunch.SocketDemangler"
        member="GetMirSocket"
        bus=session
@@ -250,7 +251,7 @@ func (iface *Unity8Interface) PermanentPlugSnippet(plug *interfaces.Plug, securi
 	return nil, nil
 }
 
-func (iface *Unity8Interface) dbusAppId (info *snap.Info, appname string) (string, error) {
+func (iface *Unity8Interface) dbusAppId (info *snap.Info, appname string) ([]byte) {
 	var retval io.Writer
 
 	appidbits := []string{info.SideInfo.RealName, appname, info.SideInfo.Revision.String()}
@@ -264,13 +265,19 @@ func (iface *Unity8Interface) dbusAppId (info *snap.Info, appname string) (strin
 		}
 	}
 
-	return fmt.Sprint(retval), nil
+	return []byte(fmt.Sprint(retval))
 }
 
 func (iface *Unity8Interface) ConnectedPlugSnippet(plug *interfaces.Plug, slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
 	switch securitySystem {
 	case interfaces.SecurityAppArmor:
-		return unity8ConnectedPlugAppArmor, nil
+		var apparmors []byte
+		for app := range plug.Apps {
+			tag := []byte("###APP_ID_DBUS###")
+			value := iface.dbusAppId(plug.PlugInfo.Snap, app)
+			apparmors = append(apparmors, bytes.Replace(unity8ConnectedPlugAppArmor, tag, value, -1)...)
+		}
+		return apparmors, nil
 	case interfaces.SecuritySecComp:
 		return secCompDBus, nil
 	}
@@ -298,6 +305,10 @@ func (iface *Unity8Interface) ConnectedSlotSnippet(plug *interfaces.Plug, slot *
 func (iface *Unity8Interface) SanitizePlug(plug *interfaces.Plug) error {
 	if iface.Name() != plug.Interface {
 		panic(fmt.Sprintf("slot is not of interface %q", iface))
+	}
+
+	if (len(plug.Apps) == 0) {
+		return fmt.Errorf("'unity8' plug must be on an application")
 	}
 
 	/* TODO: Check to ensure there is a desktop file */
