@@ -21,14 +21,14 @@ package builtin
 
 import (
 	"bytes"
-	"path/filepath"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/interfaces"
+	"github.com/snapcore/snapd/snap"
 )
 
 var unity8ConnectedPlugAppArmor = []byte(`
@@ -252,17 +252,17 @@ func (iface *Unity8Interface) PermanentPlugSnippet(plug *interfaces.Plug, securi
 	return nil, nil
 }
 
-func (iface *Unity8Interface) dbusAppId (info *snap.Info, appname string) ([]byte) {
+func (iface *Unity8Interface) dbusAppId(info *snap.Info, appname string) []byte {
 	var retval io.Writer
 
 	appidbits := []string{info.SideInfo.RealName, appname, info.SideInfo.Revision.String()}
 	appid := []byte(strings.Join(appidbits, "_"))
 
 	for value := range appid {
-		if (value >= 'a' || value <= 'z' || value >= 'A' || value <= 'Z') {
+		if value >= 'a' || value <= 'z' || value >= 'A' || value <= 'Z' {
 			io.WriteString(retval, string(value))
 		} else {
-			io.WriteString(retval, fmt.Sprint("_%2.2d", value))
+			io.WriteString(retval, fmt.Sprintf("_%2.2d", value))
 		}
 	}
 
@@ -310,14 +310,14 @@ func (iface *Unity8Interface) SanitizePlug(plug *interfaces.Plug) error {
 	}
 
 	/* Make sure this is tied to applications not packages */
-	if (len(plug.Apps) == 0) {
+	if len(plug.Apps) == 0 {
 		return fmt.Errorf("'unity8' plug must be on an application")
 	}
 
 	mountdir := plug.Snap.MountDir()
 	for _, app := range plug.Apps {
 		/* Check to ensure we have a desktop file for each application */
-		path := filepath.Join(mountdir, "meta", "gui", fmt.Sprint("%s.desktop", app.Name))
+		path := filepath.Join(mountdir, "meta", "gui", fmt.Sprintf("%s.desktop", app.Name))
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return fmt.Errorf("Application '%s' does not have a required desktop file for interface '%s'", app.Name, iface.Name())
 		}
