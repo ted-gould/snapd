@@ -21,8 +21,10 @@ package builtin
 
 import (
 	"bytes"
+	"path/filepath"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/snapcore/snapd/snap"
@@ -271,9 +273,9 @@ func (iface *Unity8Interface) ConnectedPlugSnippet(plug *interfaces.Plug, slot *
 	switch securitySystem {
 	case interfaces.SecurityAppArmor:
 		var apparmors []byte
-		for app := range plug.Apps {
+		for _, app := range plug.Apps {
 			tag := []byte("###APP_ID_DBUS###")
-			value := iface.dbusAppId(plug.PlugInfo.Snap, app)
+			value := iface.dbusAppId(plug.PlugInfo.Snap, app.Name)
 			apparmors = append(apparmors, bytes.Replace(unity8ConnectedPlugAppArmor, tag, value, -1)...)
 		}
 		return apparmors, nil
@@ -302,16 +304,34 @@ func (iface *Unity8Interface) ConnectedSlotSnippet(plug *interfaces.Plug, slot *
 }
 
 func (iface *Unity8Interface) SanitizePlug(plug *interfaces.Plug) error {
+	/* Everyone has this, me too! */
 	if iface.Name() != plug.Interface {
 		panic(fmt.Sprintf("slot is not of interface %q", iface))
 	}
 
+	/* Make sure this is tied to applications not packages */
 	if (len(plug.Apps) == 0) {
 		return fmt.Errorf("'unity8' plug must be on an application")
 	}
 
-	/* TODO: Check to ensure there is a desktop file */
-	/* TODO: Check to ensure it is on a command not a package */
+	mountdir := plug.Snap.MountDir()
+	for _, app := range plug.Apps {
+		/* Check to ensure we have a desktop file for each application */
+		path := filepath.Join(mountdir, "meta", "gui", fmt.Sprint("%s.desktop", app.Name))
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return fmt.Errorf("Application '%s' does not have a required desktop file for interface '%s'", app.Name, iface.Name())
+		}
+
+		/* Ensure that we're not daemons */
+		if app.Daemon != "" {
+			return fmt.Errorf("Application '%s' is a daemon, which isn't allowed to have a 'unity8' interface", app.Name)
+		}
+
+		/* Ensure that we're not a socket */
+		if app.Socket {
+			return fmt.Errorf("Application '%s' is a socket, which isn't allowed to have a 'unity8' interface", app.Name)
+		}
+	}
 
 	return nil
 }
