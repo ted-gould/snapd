@@ -24,6 +24,7 @@ package assertstate
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/tomb.v2"
@@ -31,6 +32,7 @@ import (
 	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/asserts/snapasserts"
 	"github.com/snapcore/snapd/asserts/sysdb"
+	"github.com/snapcore/snapd/logger"
 	"github.com/snapcore/snapd/overlord/auth"
 	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
@@ -101,10 +103,97 @@ func DB(s *state.State) asserts.RODatabase {
 	return cachedDB(s)
 }
 
-// Add the given assertion to the system assertiond database. Readding the current revision is a no-op.
+// Add the given assertion to the system assertion database.
 func Add(s *state.State, a asserts.Assertion) error {
 	// TODO: deal together with asserts itself with (cascading) side effects of possible assertion updates
 	return cachedDB(s).Add(a)
+}
+
+// Batch allows to accumulate a set of assertions possibly out of prerequisite order and then add them in one go to the system assertion database.
+type Batch struct {
+	bs   asserts.Backstore
+	refs []*asserts.Ref
+}
+
+// NewBatch creates a new Batch to accumulate assertions to add in one go to the system assertion database.
+func NewBatch() *Batch {
+	return &Batch{
+		bs:   asserts.NewMemoryBackstore(),
+		refs: nil,
+	}
+}
+
+// Add one assertion to the batch.
+func (b *Batch) Add(a asserts.Assertion) error {
+	if !a.SupportedFormat() {
+		return &asserts.UnsupportedFormatError{Ref: a.Ref(), Format: a.Format()}
+	}
+	if err := b.bs.Put(a.Type(), a); err != nil {
+		if revErr, ok := err.(*asserts.RevisionError); ok {
+			if revErr.Current >= a.Revision() {
+				// we already got something more recent
+				return nil
+			}
+		}
+		return err
+	}
+	b.refs = append(b.refs, a.Ref())
+	return nil
+}
+
+// AddStream adds a stream of assertions to the batch.
+// Returns references to to the assertions effectively added.
+func (b *Batch) AddStream(r io.Reader) ([]*asserts.Ref, error) {
+	start := len(b.refs)
+	dec := asserts.NewDecoder(r)
+	for {
+		a, err := dec.Decode()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := b.Add(a); err != nil {
+			return nil, err
+		}
+	}
+	added := b.refs[start:]
+	if len(added) == 0 {
+		return nil, nil
+	}
+	refs := make([]*asserts.Ref, len(added))
+	copy(refs, added)
+	return refs, nil
+}
+
+// Commit adds the batch of assertions to the system assertion database.
+func (b *Batch) Commit(st *state.State) error {
+	db := cachedDB(st)
+	retrieve := func(ref *asserts.Ref) (asserts.Assertion, error) {
+		a, err := b.bs.Get(ref.Type, ref.PrimaryKey, ref.Type.MaxSupportedFormat())
+		if err == asserts.ErrNotFound {
+			// fallback to pre-existing assertions
+			a, err = ref.Resolve(db.Find)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cannot find %s: %s", ref, err)
+		}
+		return a, nil
+	}
+
+	// linearize using fetcher
+	f := newFetcher(st, retrieve)
+	for _, ref := range b.refs {
+		if err := f.Fetch(ref); err != nil {
+			return err
+		}
+	}
+
+	// TODO: trigger w. caller a global sanity check if something is revoked
+	// (but try to save as much possible still),
+	// or err is a check error
+	return f.commit()
 }
 
 // TODO: snapstate also has this, move to auth, or change a bit the approach now that we have AuthContext in the store?
@@ -121,17 +210,11 @@ type fetcher struct {
 	fetched []asserts.Assertion
 }
 
-// newFetches creates a fetcher used to retrieve assertions from the store and later commit them to the system database in one go.
-func newFetcher(s *state.State, user *auth.UserState) *fetcher {
+// newFetches creates a fetcher used to retrieve assertions and later commit them to the system database in one go.
+func newFetcher(s *state.State, retrieve func(*asserts.Ref) (asserts.Assertion, error)) *fetcher {
 	db := cachedDB(s)
-	sto := snapstate.Store(s)
 
 	f := &fetcher{db: db}
-
-	retrieve := func(ref *asserts.Ref) (asserts.Assertion, error) {
-		// TODO: ignore errors if already in db?
-		return sto.Assertion(ref.Type, ref.PrimaryKey, user)
-	}
 
 	save := func(a asserts.Assertion) error {
 		f.fetched = append(f.fetched, a)
@@ -160,12 +243,14 @@ func (f *fetcher) commit() error {
 	var errs []error
 	for _, a := range f.fetched {
 		err := f.db.Add(a)
-		if revErr, ok := err.(*asserts.RevisionError); ok {
-			if revErr.Current >= a.Revision() {
-				// be idempotent
-				// system db has already the same or newer
-				continue
+		if asserts.IsUnaccceptedUpdate(err) {
+			if _, ok := err.(*asserts.UnsupportedFormatError); ok {
+				// we kept the old one, but log the issue
+				logger.Noticef("Cannot update assertion: %v", err)
 			}
+			// be idempotent
+			// system db has already the same or newer
+			continue
 		}
 		if err != nil {
 			errs = append(errs, err)
@@ -185,7 +270,14 @@ func doFetch(s *state.State, userID int, fetching func(asserts.Fetcher) error) e
 		return err
 	}
 
-	f := newFetcher(s, user)
+	sto := snapstate.Store(s)
+
+	retrieve := func(ref *asserts.Ref) (asserts.Assertion, error) {
+		// TODO: ignore errors if already in db?
+		return sto.Assertion(ref.Type, ref.PrimaryKey, user)
+	}
+
+	f := newFetcher(s, retrieve)
 
 	s.Unlock()
 	err = fetching(f)
@@ -205,24 +297,24 @@ func doValidateSnap(t *state.Task, _ *tomb.Tomb) error {
 	t.State().Lock()
 	defer t.State().Unlock()
 
-	ss, err := snapstate.TaskSnapSetup(t)
+	snapsup, err := snapstate.TaskSnapSetup(t)
 	if err != nil {
 		return nil
 	}
 
-	sha3_384, snapSize, err := asserts.SnapFileSHA3_384(ss.SnapPath)
+	sha3_384, snapSize, err := asserts.SnapFileSHA3_384(snapsup.SnapPath)
 	if err != nil {
 		return err
 	}
 
-	err = doFetch(t.State(), ss.UserID, func(f asserts.Fetcher) error {
+	err = doFetch(t.State(), snapsup.UserID, func(f asserts.Fetcher) error {
 		return snapasserts.FetchSnapAssertions(f, sha3_384)
 	})
 	if notFound, ok := err.(*store.AssertionNotFoundError); ok {
 		if notFound.Ref.Type == asserts.SnapRevisionType {
-			return fmt.Errorf("cannot verify snap %q, no matching signatures found", ss.Name())
+			return fmt.Errorf("cannot verify snap %q, no matching signatures found", snapsup.Name())
 		} else {
-			return fmt.Errorf("cannot find signatures to verify snap %q and its hash (%v)", ss.Name(), notFound)
+			return fmt.Errorf("cannot find supported signatures to verify snap %q and its hash (%v)", snapsup.Name(), notFound)
 		}
 	}
 	if err != nil {
@@ -230,7 +322,7 @@ func doValidateSnap(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	db := DB(t.State())
-	err = snapasserts.CrossCheck(ss.Name(), sha3_384, snapSize, ss.SideInfo, db)
+	err = snapasserts.CrossCheck(snapsup.Name(), sha3_384, snapSize, snapsup.SideInfo, db)
 	if err != nil {
 		// TODO: trigger a global sanity check
 		// that will generate the changes to deal with this
@@ -249,8 +341,8 @@ func RefreshSnapDeclarations(s *state.State, userID int) error {
 		return nil
 	}
 	fetching := func(f asserts.Fetcher) error {
-		for _, snapState := range snapStates {
-			info, err := snapState.CurrentInfo()
+		for _, snapst := range snapStates {
+			info, err := snapst.CurrentInfo()
 			if err != nil {
 				return err
 			}
@@ -293,8 +385,8 @@ func ValidateRefreshes(s *state.State, snapInfos []*snap.Info, userID int) (vali
 	if err != nil {
 		return nil, err
 	}
-	for snapName, snapState := range snapStates {
-		info, err := snapState.CurrentInfo()
+	for snapName, snapst := range snapStates {
+		info, err := snapst.CurrentInfo()
 		if err != nil {
 			return nil, err
 		}
@@ -383,4 +475,28 @@ func ValidateRefreshes(s *state.State, snapInfos []*snap.Info, userID int) (vali
 func init() {
 	// hook validation of refreshes into snapstate logic
 	snapstate.ValidateRefreshes = ValidateRefreshes
+}
+
+// BaseDeclaration returns the base-declaration assertion with policies governing all snaps.
+func BaseDeclaration(s *state.State) (*asserts.BaseDeclaration, error) {
+	// TODO: switch keeping this in the DB and have it revisioned/updated
+	// via the store
+	baseDecl := asserts.BuiltinBaseDeclaration()
+	if baseDecl == nil {
+		return nil, asserts.ErrNotFound
+	}
+	return baseDecl, nil
+}
+
+// SnapDeclaration returns the snap-declaration for the given snap-id if it is present in the system assertion database.
+func SnapDeclaration(s *state.State, snapID string) (*asserts.SnapDeclaration, error) {
+	db := DB(s)
+	a, err := db.Find(asserts.SnapDeclarationType, map[string]string{
+		"series":  release.Series,
+		"snap-id": snapID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a.(*asserts.SnapDeclaration), nil
 }

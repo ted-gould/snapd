@@ -35,6 +35,7 @@ import (
 	"github.com/snapcore/snapd/interfaces/backendtest"
 	"github.com/snapcore/snapd/interfaces/mount"
 	"github.com/snapcore/snapd/osutil"
+	"github.com/snapcore/snapd/snap"
 )
 
 func Test(t *testing.T) {
@@ -75,7 +76,7 @@ func (s *backendSuite) TestRemove(c *C) {
 	err := ioutil.WriteFile(appCanaryToGo, []byte("ni! ni! ni!"), 0644)
 	c.Assert(err, IsNil)
 
-	hookCanaryToGo := filepath.Join(dirs.SnapMountPolicyDir, "snap.hello-world.hook.apply-config.fstab")
+	hookCanaryToGo := filepath.Join(dirs.SnapMountPolicyDir, "snap.hello-world.hook.configure.fstab")
 	err = ioutil.WriteFile(hookCanaryToGo, []byte("ni! ni! ni!"), 0644)
 	c.Assert(err, IsNil)
 
@@ -99,7 +100,7 @@ apps:
     app1:
     app2:
 hooks:
-    apply-config:
+    configure:
         plugs: [iface-plug, iface2-plug]
 plugs:
     iface-plug:
@@ -130,14 +131,14 @@ func (s *backendSuite) TestSetupSetsupSimple(c *C) {
 		return []byte(fsEntryIF2), nil
 	}
 
-	// devMode is irrelevant for this security backend
-	s.InstallSnap(c, false, mockSnapYaml, 0)
+	// confinement type is irrelevant for this security backend
+	s.InstallSnap(c, snap.StrictConfinement, mockSnapYaml, 0)
 
 	// ensure both security snippets for iface/iface2 are combined
 	expected := strings.Split(fmt.Sprintf("%s\n%s\n", fsEntryIF1, fsEntryIF2), "\n")
 	sort.Strings(expected)
 	// and we have them both for both apps and the hook
-	for _, binary := range []string{"app1", "app2", "hook.apply-config"} {
+	for _, binary := range []string{"app1", "app2", "hook.configure"} {
 		fn1 := filepath.Join(dirs.SnapMountPolicyDir, fmt.Sprintf("snap.snap-name.%s.fstab", binary))
 		content, err := ioutil.ReadFile(fn1)
 		c.Assert(err, IsNil, Commentf("Expected mount file for %q", binary))
@@ -157,9 +158,9 @@ func (s *backendSuite) TestSetupSetsupWithoutDir(c *C) {
 
 	// Ensure that backend.Setup() creates the required dir on demand
 	os.Remove(dirs.SnapMountPolicyDir)
-	s.InstallSnap(c, false, mockSnapYaml, 0)
+	s.InstallSnap(c, snap.StrictConfinement, mockSnapYaml, 0)
 
-	for _, binary := range []string{"app1", "app2", "hook.apply-config"} {
+	for _, binary := range []string{"app1", "app2", "hook.configure"} {
 		fn := filepath.Join(dirs.SnapMountPolicyDir, fmt.Sprintf("snap.snap-name.%s.fstab", binary))
 		c.Assert(osutil.FileExists(fn), Equals, true, Commentf("Expected mount file for %q", binary))
 	}

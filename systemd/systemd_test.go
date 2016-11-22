@@ -191,11 +191,22 @@ func (s *SystemdTestSuite) TestDisable(c *C) {
 	c.Check(s.argses, DeepEquals, [][]string{{"--root", "xyzzy", "disable", "foo"}})
 }
 
+func (s *SystemdTestSuite) TestDisableNow(c *C) {
+	err := New("xyzzy", s.rep).DisableNow("foo")
+	c.Assert(err, IsNil)
+	c.Check(s.argses, DeepEquals, [][]string{{"--root", "xyzzy", "--now", "disable", "foo"}})
+}
+
 func (s *SystemdTestSuite) TestEnable(c *C) {
 	err := New("xyzzy", s.rep).Enable("foo")
 	c.Assert(err, IsNil)
 	c.Check(s.argses, DeepEquals, [][]string{{"--root", "xyzzy", "enable", "foo"}})
+}
 
+func (s *SystemdTestSuite) TestEnableNow(c *C) {
+	err := New("xyzzy", s.rep).EnableNow("foo")
+	c.Assert(err, IsNil)
+	c.Check(s.argses, DeepEquals, [][]string{{"--root", "xyzzy", "--now", "enable", "foo"}})
 }
 
 func (s *SystemdTestSuite) TestRestart(c *C) {
@@ -278,7 +289,7 @@ func (s *SystemdTestSuite) TestLogString(c *C) {
 }
 
 func (s *SystemdTestSuite) TestMountUnitPath(c *C) {
-	c.Assert(MountUnitPath("/apps/hello/1.1", "mount"), Equals, filepath.Join(dirs.SnapServicesDir, "apps-hello-1.1.mount"))
+	c.Assert(MountUnitPath("/apps/hello/1.1"), Equals, filepath.Join(dirs.SnapServicesDir, "apps-hello-1.1.mount"))
 }
 
 func (s *SystemdTestSuite) TestWriteMountUnit(c *C) {
@@ -381,6 +392,7 @@ Description=Mount unit for foo
 What=%s
 Where=/apps/foo/1.0
 Type=fuse.squashfuse
+Options=ro,allow_other
 
 [Install]
 WantedBy=multi-user.target

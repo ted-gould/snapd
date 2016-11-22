@@ -39,6 +39,10 @@ var defaultTemplate = []byte(`
   #include <abstractions/consoles>
   #include <abstractions/openssl>
 
+  # While in later versions of the base abstraction, include this explicitly
+  # for series 16 and cross-distro
+  /etc/ld.so.preload r,
+
   # for python apps/services
   #include <abstractions/python>
   /usr/bin/python{,2,2.[0-9]*,3,3.[0-9]*} ixr,
@@ -233,6 +237,7 @@ var defaultTemplate = []byte(`
   owner @{PROC}/@{pid}/cmdline r,
 
   # Miscellaneous accesses
+  /dev/{,u}random w,
   /etc/machine-id r,
   /etc/mime.types r,
   @{PROC}/ r,
@@ -314,6 +319,10 @@ var defaultTemplate = []byte(`
   # App-specific access to files and directories in /dev/shm. We allow file
   # access in /dev/shm for shm_open() and files in subdirectories for open()
   /{dev,run}/shm/snap.@{SNAP_NAME}.** mrwlkix,
+
+  # Snap-specific XDG_RUNTIME_DIR that is based on the UID of the user
+  owner /{dev,run}/user/[0-9]*/snap.@{SNAP_NAME}/   rw,
+  owner /{dev,run}/user/[0-9]*/snap.@{SNAP_NAME}/** mrwklix,
 
   # Allow apps from the same package to communicate with each other via an
   # abstract or anonymous socket

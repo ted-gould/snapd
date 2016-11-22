@@ -120,8 +120,10 @@ type Change struct {
 	kind    string
 	summary string
 	status  Status
+	clean   bool
 	data    customData
 	taskIDs []string
+	lanes   int
 	ready   chan struct{}
 
 	spawnTime time.Time
@@ -146,8 +148,10 @@ type marshalledChange struct {
 	Kind    string                      `json:"kind"`
 	Summary string                      `json:"summary"`
 	Status  Status                      `json:"status"`
+	Clean   bool                        `json:"clean,omitempty"`
 	Data    map[string]*json.RawMessage `json:"data,omitempty"`
 	TaskIDs []string                    `json:"task-ids,omitempty"`
+	Lanes   int                         `json:"lanes,omitempty"`
 
 	SpawnTime time.Time  `json:"spawn-time"`
 	ReadyTime *time.Time `json:"ready-time,omitempty"`
@@ -165,8 +169,10 @@ func (c *Change) MarshalJSON() ([]byte, error) {
 		Kind:    c.kind,
 		Summary: c.summary,
 		Status:  c.status,
+		Clean:   c.clean,
 		Data:    c.data,
 		TaskIDs: c.taskIDs,
+		Lanes:   c.lanes,
 
 		SpawnTime: c.spawnTime,
 		ReadyTime: readyTime,
@@ -187,12 +193,14 @@ func (c *Change) UnmarshalJSON(data []byte) error {
 	c.kind = unmarshalled.Kind
 	c.summary = unmarshalled.Summary
 	c.status = unmarshalled.Status
+	c.clean = unmarshalled.Clean
 	custData := unmarshalled.Data
 	if custData == nil {
 		custData = make(customData)
 	}
 	c.data = custData
 	c.taskIDs = unmarshalled.TaskIDs
+	c.lanes = unmarshalled.Lanes
 	c.ready = make(chan struct{})
 	c.spawnTime = unmarshalled.SpawnTime
 	if unmarshalled.ReadyTime != nil {
@@ -324,14 +332,48 @@ func (c *Change) taskStatusChanged(t *Task, old, new Status) {
 	// Here is the exact moment when a change goes from unready to ready,
 	// and from ready to unready. For now handle only the first of those.
 	// For the latter the channel might be replaced in the future.
-	select {
-	case <-c.ready:
-		if !c.Status().Ready() {
-			panic(fmt.Errorf("change %s unexpectedly became unready (%s)", c.ID(), c.Status()))
-		}
-	default:
+	if c.IsReady() && !c.Status().Ready() {
+		panic(fmt.Errorf("change %s unexpectedly became unready (%s)", c.ID(), c.Status()))
 	}
 	c.markReady()
+}
+
+// IsClean returns whether all tasks in the change have been cleaned. See SetClean.
+func (c *Change) IsClean() bool {
+	c.state.reading()
+	return c.clean
+}
+
+// IsReady returns whether the change is considered ready.
+//
+// The result is similar to calling Ready on the status returned by the Status
+// method, but this function is more efficient as it doesn't need to recompute
+// the aggregated state of tasks on every call.
+//
+// As an exception, IsReady returns false for a Change without any tasks that
+// never had its status explicitly set and was never unmarshalled out of the
+// persistent state, despite its initial status being Hold. This is how the
+// system represents changes right after they are created.
+func (c *Change) IsReady() bool {
+	select {
+	case <-c.ready:
+		return true
+	default:
+	}
+	return false
+}
+
+func (c *Change) taskCleanChanged() {
+	if !c.IsReady() {
+		panic("internal error: attempted to set a task clean while change not ready")
+	}
+	for _, tid := range c.taskIDs {
+		task := c.state.tasks[tid]
+		if !task.clean {
+			return
+		}
+	}
+	c.clean = true
 }
 
 // SpawnTime returns the time when the change was created.
@@ -429,21 +471,104 @@ func (c *Change) Tasks() []*Task {
 	return c.state.tasksIn(c.taskIDs)
 }
 
-// Abort flags the change for cancellation, whether in progress or not. Cancellation will proceed at the next ensure pass.
+// Abort flags the change for cancellation, whether in progress or not.
+// Cancellation will proceed at the next ensure pass.
 func (c *Change) Abort() {
 	c.state.writing()
+	tasks := make([]*Task, len(c.taskIDs))
+	for i, tid := range c.taskIDs {
+		tasks[i] = c.state.tasks[tid]
+	}
+	c.abortTasks(tasks, make(map[int]bool))
+}
+
+// AbortLanes aborts all tasks in the provided lanes and any tasks waiting on them,
+// except for tasks that are also in a healthy lane (not aborted, and not waiting
+// on aborted).
+func (c *Change) AbortLanes(lanes []int) {
+	c.state.writing()
+	c.abortLanes(lanes, make(map[int]bool))
+}
+
+func (c *Change) abortLanes(lanes []int, abortedLanes map[int]bool) {
+	var hasLive = make(map[int]bool)
+	var hasDead = make(map[int]bool)
+	var laneTasks []*Task
+NextChangeTask:
 	for _, tid := range c.taskIDs {
 		t := c.state.tasks[tid]
+
+		var live bool
+		switch t.Status() {
+		case DoStatus, DoingStatus, DoneStatus:
+			live = true
+		}
+
+		for _, tlane := range t.Lanes() {
+			for _, lane := range lanes {
+				if tlane == lane {
+					laneTasks = append(laneTasks, t)
+					continue NextChangeTask
+				}
+			}
+
+			// Track opinion about lanes not in the kill list.
+			// If the lane ends up being entirely live, we'll
+			// preserve this task alive too.
+			if live {
+				hasLive[tlane] = true
+			} else {
+				hasDead[tlane] = true
+			}
+		}
+	}
+
+	abortTasks := make([]*Task, 0, len(laneTasks))
+NextLaneTask:
+	for _, t := range laneTasks {
+		for _, tlane := range t.Lanes() {
+			if hasLive[tlane] && !hasDead[tlane] {
+				continue NextLaneTask
+			}
+		}
+		abortTasks = append(abortTasks, t)
+	}
+
+	for _, lane := range lanes {
+		abortedLanes[lane] = true
+	}
+	if len(abortTasks) > 0 {
+		c.abortTasks(abortTasks, abortedLanes)
+	}
+}
+
+func (c *Change) abortTasks(tasks []*Task, abortedLanes map[int]bool) {
+	var lanes []int
+	for i := 0; i < len(tasks); i++ {
+		t := tasks[i]
 		switch t.Status() {
 		case DoStatus:
 			// Still pending so don't even start.
 			t.SetStatus(HoldStatus)
-		case DoneStatus:
-			// Already done so undo it.
-			t.SetStatus(UndoStatus)
 		case DoingStatus:
 			// In progress so stop and undo it.
 			t.SetStatus(AbortStatus)
+		case DoneStatus:
+			// Already done so undo it.
+			t.SetStatus(UndoStatus)
 		}
+
+		for _, lane := range t.Lanes() {
+			if !abortedLanes[lane] {
+				lanes = append(lanes, t.Lanes()...)
+			}
+		}
+
+		for _, halted := range t.HaltTasks() {
+			tasks = append(tasks, halted)
+		}
+	}
+	if len(lanes) > 0 {
+		c.abortLanes(lanes, abortedLanes)
 	}
 }

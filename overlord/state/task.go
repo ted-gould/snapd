@@ -28,8 +28,9 @@ import (
 )
 
 type progress struct {
-	Done  int `json:"done"`
-	Total int `json:"total"`
+	Label string `json:"label"`
+	Done  int    `json:"done"`
+	Total int    `json:"total"`
 }
 
 // Task represents an individual operation to be performed
@@ -42,10 +43,12 @@ type Task struct {
 	kind      string
 	summary   string
 	status    Status
+	clean     bool
 	progress  *progress
 	data      customData
 	waitTasks []string
 	haltTasks []string
+	lanes     []int
 	log       []string
 	change    string
 
@@ -72,10 +75,12 @@ type marshalledTask struct {
 	Kind      string                      `json:"kind"`
 	Summary   string                      `json:"summary"`
 	Status    Status                      `json:"status"`
+	Clean     bool                        `json:"clean,omitempty"`
 	Progress  *progress                   `json:"progress,omitempty"`
 	Data      map[string]*json.RawMessage `json:"data,omitempty"`
 	WaitTasks []string                    `json:"wait-tasks,omitempty"`
 	HaltTasks []string                    `json:"halt-tasks,omitempty"`
+	Lanes     []int                       `json:"lanes,omitempty"`
 	Log       []string                    `json:"log,omitempty"`
 	Change    string                      `json:"change"`
 
@@ -101,10 +106,12 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		Kind:      t.kind,
 		Summary:   t.summary,
 		Status:    t.status,
+		Clean:     t.clean,
 		Progress:  t.progress,
 		Data:      t.data,
 		WaitTasks: t.waitTasks,
 		HaltTasks: t.haltTasks,
+		Lanes:     t.lanes,
 		Log:       t.log,
 		Change:    t.change,
 
@@ -129,6 +136,7 @@ func (t *Task) UnmarshalJSON(data []byte) error {
 	t.kind = unmarshalled.Kind
 	t.summary = unmarshalled.Summary
 	t.status = unmarshalled.Status
+	t.clean = unmarshalled.Clean
 	t.progress = unmarshalled.Progress
 	custData := unmarshalled.Data
 	if custData == nil {
@@ -137,6 +145,7 @@ func (t *Task) UnmarshalJSON(data []byte) error {
 	t.data = custData
 	t.waitTasks = unmarshalled.WaitTasks
 	t.haltTasks = unmarshalled.HaltTasks
+	t.lanes = unmarshalled.Lanes
 	t.log = unmarshalled.Log
 	t.change = unmarshalled.Change
 	t.spawnTime = unmarshalled.SpawnTime
@@ -187,6 +196,27 @@ func (t *Task) SetStatus(new Status) {
 	}
 }
 
+// IsClean returns whether the task has been cleaned. See SetClean.
+func (t *Task) IsClean() bool {
+	t.state.reading()
+	return t.clean
+}
+
+// SetClean flags the task as clean after any left over data was removed.
+//
+// Cleaning a task must only be done after the change is ready.
+func (t *Task) SetClean() {
+	t.state.writing()
+	if t.clean {
+		return
+	}
+	t.clean = true
+	chg := t.Change()
+	if chg != nil {
+		chg.taskCleanChanged()
+	}
+}
+
 // State returns the system State
 func (t *Task) State() *State {
 	return t.state
@@ -201,19 +231,19 @@ func (t *Task) Change() *Change {
 // Progress returns the current progress for the task.
 // If progress is not explicitly set, it returns
 // (0, 1) if the status is DoStatus and (1, 1) otherwise.
-func (t *Task) Progress() (done, total int) {
+func (t *Task) Progress() (label string, done, total int) {
 	t.state.reading()
 	if t.progress == nil {
 		if t.Status() == DoStatus {
-			return 0, 1
+			return "", 0, 1
 		}
-		return 1, 1
+		return "", 1, 1
 	}
-	return t.progress.Done, t.progress.Total
+	return t.progress.Label, t.progress.Done, t.progress.Total
 }
 
 // SetProgress sets the task progress to cur out of total steps.
-func (t *Task) SetProgress(done, total int) {
+func (t *Task) SetProgress(label string, done, total int) {
 	// Only mark state for checkpointing if progress is final.
 	if total > 0 && done == total {
 		t.state.writing()
@@ -224,7 +254,7 @@ func (t *Task) SetProgress(done, total int) {
 		// Doing math wrong is easy. Be conservative.
 		t.progress = nil
 	} else {
-		t.progress = &progress{Done: done, Total: total}
+		t.progress = &progress{Label: label, Done: done, Total: total}
 	}
 }
 
@@ -357,7 +387,23 @@ func (t *Task) HaltTasks() []*Task {
 	return t.state.tasksIn(t.haltTasks)
 }
 
-// At schedules the task, if it's not ready, to happen no earlier than when, if when is the zero time any previous special scheduling is supressed.
+// Lanes returns the lanes the task is in.
+func (t *Task) Lanes() []int {
+	t.state.reading()
+	if len(t.lanes) == 0 {
+		return []int{0}
+	}
+	return t.lanes
+}
+
+// JoinLane registers the task in the provided lane. Tasks in different lanes
+// abort independently on errors. See Change.AbortLane for details.
+func (t *Task) JoinLane(lane int) {
+	t.state.writing()
+	t.lanes = append(t.lanes, lane)
+}
+
+// At schedules the task, if it's not ready, to happen no earlier than when, if when is the zero time any previous special scheduling is suppressed.
 func (t *Task) At(when time.Time) {
 	t.state.writing()
 	iszero := when.IsZero()
@@ -414,6 +460,13 @@ func (ts *TaskSet) AddTask(task *Task) {
 func (ts *TaskSet) AddAll(anotherTs *TaskSet) {
 	for _, t := range anotherTs.tasks {
 		ts.AddTask(t)
+	}
+}
+
+// JoinLane adds all the tasks in the current taskset to the given lane
+func (ts *TaskSet) JoinLane(lane int) {
+	for _, t := range ts.tasks {
+		t.JoinLane(lane)
 	}
 }
 

@@ -56,6 +56,9 @@ type PlaceInfo interface {
 
 	// CommonDataHomeDir returns the per user data directory common across revisions of the snap.
 	CommonDataHomeDir() string
+
+	// XdgRuntimeDirs returns the XDG_RUNTIME_DIR directories for all users of the snap.
+	XdgRuntimeDirs() string
 }
 
 // MinimalPlaceInfo returns a PlaceInfo with just the location information for a snap of the given name and revision.
@@ -66,6 +69,16 @@ func MinimalPlaceInfo(name string, revision Revision) PlaceInfo {
 // MountDir returns the base directory where it gets mounted of the snap with the given name and revision.
 func MountDir(name string, revision Revision) string {
 	return filepath.Join(dirs.SnapMountDir, name, revision.String())
+}
+
+// MountFile returns the path where the snap file that is mounted is installed.
+func MountFile(name string, revision Revision) string {
+	return filepath.Join(dirs.SnapBlobDir, fmt.Sprintf("%s_%s.snap", name, revision))
+}
+
+// ScopedSecurityTag returns the snap-specific, scope specific, security tag.
+func ScopedSecurityTag(snapName, scopeName, suffix string) string {
+	return fmt.Sprintf("snap.%s.%s.%s", snapName, scopeName, suffix)
 }
 
 // SecurityTag returns the snap-specific security tag.
@@ -80,13 +93,13 @@ func AppSecurityTag(snapName, appName string) string {
 
 // HookSecurityTag returns the hook-specific security tag.
 func HookSecurityTag(snapName, hookName string) string {
-	return fmt.Sprintf("%s.hook.%s", SecurityTag(snapName), hookName)
+	return ScopedSecurityTag(snapName, "hook", hookName)
 }
 
 // NoneSecurityTag returns the security tag for interfaces that
 // are not associated to an app or hook in the snap.
 func NoneSecurityTag(snapName, uniqueName string) string {
-	return fmt.Sprintf("%s.none.%s", SecurityTag(snapName), uniqueName)
+	return ScopedSecurityTag(snapName, "none", uniqueName)
 }
 
 // SideInfo holds snap metadata that is crucial for the tracking of
@@ -138,13 +151,17 @@ type Info struct {
 	// The information in all the remaining fields is not sourced from the snap blob itself.
 	SideInfo
 
+	// Broken marks if set whether the snap is broken and the reason.
+	Broken string
+
 	// The information in these fields is ephemeral, available only from the store.
 	DownloadInfo
 
 	IconURL string
 	Prices  map[string]float64 `yaml:"prices,omitempty" json:"prices,omitempty"`
 	MustBuy bool
-	Broken  string
+
+	Screenshots []ScreenshotInfo
 }
 
 // Name returns the blessed name for the snap.
@@ -178,7 +195,7 @@ func (s *Info) MountDir() string {
 
 // MountFile returns the path where the snap file that is mounted is installed.
 func (s *Info) MountFile() string {
-	return filepath.Join(dirs.SnapBlobDir, fmt.Sprintf("%s_%s.snap", s.Name(), s.Revision))
+	return MountFile(s.Name(), s.Revision)
 }
 
 // HooksDir returns the directory containing the snap's hooks.
@@ -216,6 +233,16 @@ func (s *Info) CommonDataHomeDir() string {
 	return filepath.Join(dirs.SnapDataHomeGlob, s.Name(), "common")
 }
 
+// UserXdgRuntimeDir returns the XDG_RUNTIME_DIR directory of the snap for a particular user.
+func (s *Info) UserXdgRuntimeDir(euid int) string {
+	return filepath.Join("/run/user", fmt.Sprintf("%d/snap.%s", euid, s.Name()))
+}
+
+// XdgRuntimeDirs returns the XDG_RUNTIME_DIR directories for all users of the snap.
+func (s *Info) XdgRuntimeDirs() string {
+	return filepath.Join(dirs.XdgRuntimeDirGlob, fmt.Sprintf("snap.%s", s.Name()))
+}
+
 // NeedsDevMode retursn whether the snap needs devmode.
 func (s *Info) NeedsDevMode() bool {
 	return s.Confinement == DevmodeConfinement
@@ -230,6 +257,10 @@ type DownloadInfo struct {
 	Size     int64  `json:"size,omitempty"`
 	Sha3_384 string `json:"sha3-384,omitempty"`
 
+	// The server can include information about available deltas for a given
+	// snap at a specific revision during refresh. Currently during refresh the
+	// server will provide single matching deltas only, from the clients
+	// revision to the target revision when available, per requested format.
 	Deltas []DeltaInfo `json:"deltas,omitempty"`
 }
 
@@ -297,6 +328,13 @@ type AppInfo struct {
 	Slots map[string]*SlotInfo
 
 	Environment map[string]string
+}
+
+// ScreenshotInfo provides information about a screenshot.
+type ScreenshotInfo struct {
+	URL    string
+	Width  int64
+	Height int64
 }
 
 // HookInfo provides information about a hook.
@@ -440,6 +478,12 @@ func ReadInfo(name string, si *SideInfo) (*Info, error) {
 		return nil, err
 	}
 
+	st, err := os.Stat(MountFile(name, si.Revision))
+	if err != nil {
+		return nil, err
+	}
+	info.Size = st.Size()
+
 	err = addImplicitHooks(info)
 	if err != nil {
 		return nil, err
@@ -457,6 +501,11 @@ func ReadInfoFromSnapFile(snapf Container, si *SideInfo) (*Info, error) {
 	}
 
 	info, err := infoFromSnapYamlWithSideInfo(meta, si)
+	if err != nil {
+		return nil, err
+	}
+
+	info.Size, err = snapf.Size()
 	if err != nil {
 		return nil, err
 	}

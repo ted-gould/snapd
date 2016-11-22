@@ -391,7 +391,9 @@ func (ss *stateSuite) TestNewTaskAndCheckpoint(c *C) {
 	t1ID := t1.ID()
 	t1.Set("a", 1)
 	t1.SetStatus(state.DoneStatus)
-	t1.SetProgress(5, 10)
+	t1.SetProgress("snap", 5, 10)
+	t1.JoinLane(42)
+	t1.JoinLane(43)
 
 	t2 := st.NewTask("inst", "2...")
 	chg.AddTask(t2)
@@ -436,9 +438,11 @@ func (ss *stateSuite) TestNewTaskAndCheckpoint(c *C) {
 
 	c.Check(task0_1.Status(), Equals, state.DoneStatus)
 
-	cur, tot := task0_1.Progress()
+	_, cur, tot := task0_1.Progress()
 	c.Check(cur, Equals, 5)
 	c.Check(tot, Equals, 10)
+
+	c.Assert(task0_1.Lanes(), DeepEquals, []int{42, 43})
 
 	task0_2 := tasks0[t2ID]
 	c.Check(task0_2.WaitTasks(), DeepEquals, []*state.Task{task0_1})
@@ -534,6 +538,8 @@ func (ss *stateSuite) TestCheckpointPreserveLastIds(c *C) {
 	st.NewTask("download", "...")
 	st.NewTask("download", "...")
 
+	c.Assert(st.NewLane(), Equals, 1)
+
 	// implicit checkpoint
 	st.Unlock()
 
@@ -549,6 +555,40 @@ func (ss *stateSuite) TestCheckpointPreserveLastIds(c *C) {
 
 	c.Assert(st2.NewTask("download", "...").ID(), Equals, "3")
 	c.Assert(st2.NewChange("install", "...").ID(), Equals, "2")
+
+	c.Assert(st2.NewLane(), Equals, 2)
+
+}
+
+func (ss *stateSuite) TestCheckpointPreserveCleanStatus(c *C) {
+	b := new(fakeStateBackend)
+	st := state.New(b)
+	st.Lock()
+
+	chg := st.NewChange("install", "...")
+	t := st.NewTask("download", "...")
+	chg.AddTask(t)
+	t.SetStatus(state.DoneStatus)
+	t.SetClean()
+
+	// implicit checkpoint
+	st.Unlock()
+
+	c.Assert(b.checkpoints, HasLen, 1)
+
+	buf := bytes.NewBuffer(b.checkpoints[0])
+
+	st2, err := state.ReadState(nil, buf)
+	c.Assert(err, IsNil)
+
+	st2.Lock()
+	defer st2.Unlock()
+
+	chg2 := st2.Change(chg.ID())
+	t2 := st2.Task(t.ID())
+
+	c.Assert(chg2.IsClean(), Equals, true)
+	c.Assert(t2.IsClean(), Equals, true)
 }
 
 func (ss *stateSuite) TestNewTaskAndTasks(c *C) {
@@ -616,6 +656,7 @@ func (ss *stateSuite) TestMethodEntrance(c *C) {
 		func() { st.NewChange("install", "...") },
 		func() { st.NewTask("download", "...") },
 		func() { st.UnmarshalJSON(nil) },
+		func() { st.NewLane() },
 	}
 
 	reads := []func(){
@@ -628,7 +669,7 @@ func (ss *stateSuite) TestMethodEntrance(c *C) {
 		func() { st.Task("foo") },
 		func() { st.MarshalJSON() },
 		func() { st.Prune(time.Hour, time.Hour) },
-		func() { st.NumTask() },
+		func() { st.TaskCount() },
 	}
 
 	for i, f := range reads {
@@ -706,7 +747,27 @@ func (ss *stateSuite) TestPrune(c *C) {
 	c.Assert(t3.Status(), Equals, state.DoStatus)
 	c.Assert(t4.Status(), Equals, state.DoStatus)
 
-	c.Check(st.NumTask(), Equals, 3)
+	c.Check(st.TaskCount(), Equals, 3)
+}
+
+func (ss *stateSuite) TestPruneEmptyChange(c *C) {
+	// Empty changes are a bit special because they start out on Hold
+	// which is a Ready status, but the change itself is not considered Ready
+	// explicitly because that's how every change that will have tasks added
+	// to it starts their life.
+	st := state.New(&fakeStateBackend{})
+	st.Lock()
+	defer st.Unlock()
+
+	now := time.Now()
+	pruneWait := 1 * time.Hour
+	abortWait := 3 * time.Hour
+
+	chg := st.NewChange("abort", "...")
+	state.MockChangeTimes(chg, now.Add(-pruneWait), time.Time{})
+
+	st.Prune(pruneWait, abortWait)
+	c.Assert(st.Change(chg.ID()), IsNil)
 }
 
 func (ss *stateSuite) TestRequestRestart(c *C) {

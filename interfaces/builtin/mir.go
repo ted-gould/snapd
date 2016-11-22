@@ -57,6 +57,7 @@ open
 getsockopt
 recvmsg
 sendmsg
+recvfrom
 `)
 
 var mirConnectedSlotAppArmor = []byte(`
@@ -79,6 +80,7 @@ var mirConnectedPlugSecComp = []byte(`
 recvmsg
 sendmsg
 sendto
+recvfrom
 `)
 
 type MirInterface struct{}
@@ -135,6 +137,6 @@ func (iface *MirInterface) SanitizeSlot(slot *interfaces.Slot) error {
 	return nil
 }
 
-func (iface *MirInterface) AutoConnect() bool {
+func (iface *MirInterface) AutoConnect(*interfaces.Plug, *interfaces.Slot) bool {
 	return true
 }

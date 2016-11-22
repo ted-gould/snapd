@@ -33,14 +33,13 @@ type StoreService interface {
 	Find(search *store.Search, user *auth.UserState) ([]*snap.Info, error)
 	ListRefresh([]*store.RefreshCandidate, *auth.UserState) ([]*snap.Info, error)
 
-	Download(string, *snap.DownloadInfo, progress.Meter, *auth.UserState) (string, error)
+	Download(string, string, *snap.DownloadInfo, progress.Meter, *auth.UserState) error
 
 	Assertion(assertType *asserts.AssertionType, primaryKey []string, user *auth.UserState) (asserts.Assertion, error)
 
 	SuggestedCurrency() string
 	Buy(options *store.BuyOptions, user *auth.UserState) (*store.BuyResult, error)
-	// TODO Remove once the CLI is using the new /buy/ready endpoint
-	PaymentMethods(*auth.UserState) (*store.PaymentInformation, error)
+	ReadyToBuy(*auth.UserState) error
 }
 
 type managerBackend interface {
@@ -62,6 +61,7 @@ type managerBackend interface {
 	RemoveSnapFiles(s snap.PlaceInfo, typ snap.Type, meter progress.Meter) error
 	RemoveSnapData(info *snap.Info) error
 	RemoveSnapCommonData(info *snap.Info) error
+	DiscardSnapNamespace(snapName string) error
 
 	// testing helpers
 	CurrentInfo(cur *snap.Info)

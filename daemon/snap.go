@@ -93,8 +93,8 @@ func allLocalSnapInfos(st *state.State) ([]aboutSnap, error) {
 	about := make([]aboutSnap, 0, len(snapStates))
 
 	var firstErr error
-	for _, snapState := range snapStates {
-		info, err := snapState.CurrentInfo()
+	for _, snapst := range snapStates {
+		info, err := snapst.CurrentInfo()
 		if err != nil {
 			// XXX: aggregate instead?
 			if firstErr == nil {
@@ -102,7 +102,7 @@ func allLocalSnapInfos(st *state.State) ([]aboutSnap, error) {
 			}
 			continue
 		}
-		about = append(about, aboutSnap{info, snapState})
+		about = append(about, aboutSnap{info, snapst})
 	}
 
 	return about, firstErr
@@ -111,6 +111,13 @@ func allLocalSnapInfos(st *state.State) ([]aboutSnap, error) {
 // appJSON contains the json for snap.AppInfo
 type appJSON struct {
 	Name string `json:"name"`
+}
+
+// screenshotJSON contains the json for snap.ScreenshotInfo
+type screenshotJSON struct {
+	URL    string `json:"url"`
+	Width  int64  `json:"width,omitempty"`
+	Height int64  `json:"height,omitempty"`
 }
 
 func mapLocal(localSnap *snap.Info, snapst *snapstate.SnapState) map[string]interface{} {
@@ -141,8 +148,8 @@ func mapLocal(localSnap *snap.Info, snapst *snapstate.SnapState) map[string]inte
 		"version":        localSnap.Version,
 		"channel":        localSnap.Channel,
 		"confinement":    localSnap.Confinement,
-		"devmode":        snapst.DevMode(),
-		"trymode":        snapst.TryMode(),
+		"devmode":        snapst.DevMode,
+		"trymode":        snapst.TryMode,
 		"private":        localSnap.Private,
 		"apps":           apps,
 		"broken":         localSnap.Broken,
@@ -160,6 +167,15 @@ func mapRemote(remoteSnap *snap.Info) map[string]interface{} {
 		confinement = snap.StrictConfinement
 	}
 
+	screenshots := make([]screenshotJSON, len(remoteSnap.Screenshots))
+	for i, screenshot := range remoteSnap.Screenshots {
+		screenshots[i] = screenshotJSON{
+			URL:    screenshot.URL,
+			Width:  screenshot.Width,
+			Height: screenshot.Height,
+		}
+	}
+
 	result := map[string]interface{}{
 		"description":   remoteSnap.Description(),
 		"developer":     remoteSnap.Developer,
@@ -175,6 +191,10 @@ func mapRemote(remoteSnap *snap.Info) map[string]interface{} {
 		"channel":       remoteSnap.Channel,
 		"private":       remoteSnap.Private,
 		"confinement":   confinement,
+	}
+
+	if len(screenshots) > 0 {
+		result["screenshots"] = screenshots
 	}
 
 	if len(remoteSnap.Prices) > 0 {

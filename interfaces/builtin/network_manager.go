@@ -69,6 +69,14 @@ network packet,
 
 /run/udev/data/* r,
 
+# Allow access to configuration files generated on the fly
+# from netplan and let NetworkManager store its DHCP leases
+# in the dhcp subdirectory so that console-conf can access
+# it.
+/run/NetworkManager/ w,
+/run/NetworkManager/{,**} r,
+/run/NetworkManager/dhcp/{,**} w,
+
 # Needed by the ifupdown plugin to check which interfaces can
 # be managed an which not.
 /etc/network/interfaces r,
@@ -77,6 +85,13 @@ network packet,
 
 # Needed to use resolvconf from core
 /sbin/resolvconf ixr,
+/run/resolvconf/{,**} r,
+/run/resolvconf/** w,
+/etc/resolvconf/{,**} r,
+/lib/resolvconf/* ix,
+# Required by resolvconf
+/bin/run-parts ixr,
+/etc/resolvconf/update.d/* ix,
 
 #include <abstractions/nameservice>
 
@@ -122,10 +137,16 @@ dbus (receive, send)
     interface=org.freedesktop.DBus.*,
 
 # Allow access to hostname system service
-dbus (send)
+dbus (receive, send)
     bus=system
     path=/org/freedesktop/hostname1
     interface=org.freedesktop.DBus.Properties
+    peer=(label=unconfined),
+dbus(receive, send)
+    bus=system
+    path=/org/freedesktop/hostname1
+    interface=org.freedesktop.hostname1
+    member={Set,SetStatic}Hostname
     peer=(label=unconfined),
 
 # Sleep monitor inside NetworkManager needs this
@@ -190,6 +211,7 @@ sendmmsg
 sendmsg
 sendto
 setsockopt
+sethostname
 shutdown
 socketpair
 socket
@@ -428,6 +450,7 @@ func (iface *NetworkManagerInterface) SanitizeSlot(slot *interfaces.Slot) error 
 	return nil
 }
 
-func (iface *NetworkManagerInterface) AutoConnect() bool {
-	return false
+func (iface *NetworkManagerInterface) AutoConnect(*interfaces.Plug, *interfaces.Slot) bool {
+	// allow what declarations allowed
+	return true
 }
