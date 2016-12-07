@@ -1,3 +1,9 @@
+snapd (2.18+unity8-1) xenial; urgency=medium
+
+  * Adding the Unity8 interface
+
+ -- Ted Gould <ted@ubuntu.com>  Wed, 07 Dec 2016 17:06:31 -0600
+
 snapd (2.18) xenial; urgency=medium
 
   * New upstream release, LP: #1644625
