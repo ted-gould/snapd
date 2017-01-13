@@ -146,6 +146,7 @@ func (s *baseDeclSuite) TestAutoConnection(c *C) {
 		"pulseaudio":             true,
 		"screen-inhibit-control": true,
 		"unity7":                 true,
+		"unity8":                 true,
 		"upower-observe":         true,
 		"x11":                    true,
 	}
@@ -369,6 +370,7 @@ var (
 		"serial-port":      {"core", "gadget"},
 		"udisks2":          {"app"},
 		"upower-observe":   {"app", "core"},
+		"unity8":           {"app"},
 		// snowflakes
 		"docker": nil,
 		"lxd":    nil,
@@ -477,6 +479,7 @@ func (s *baseDeclSuite) TestConnection(c *C) {
 		"lxd":              true,
 		"mir":              true,
 		"udisks2":          true,
+		"unity8":           true,
 	}
 
 	for _, iface := range all {

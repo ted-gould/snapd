@@ -309,6 +309,10 @@ func (iface *Unity8Interface) SanitizePlug(plug *interfaces.Plug) error {
 		panic(fmt.Sprintf("slot is not of interface %q", iface))
 	}
 
+	if plug.Snap.Type != "app" {
+		return fmt.Errorf("'unity8' plug must be on an application")
+	}
+
 	/* Make sure this is tied to applications not packages */
 	if len(plug.Apps) == 0 {
 		return fmt.Errorf("'unity8' plug must be on an application")
@@ -326,11 +330,6 @@ func (iface *Unity8Interface) SanitizePlug(plug *interfaces.Plug) error {
 		if app.Daemon != "" {
 			return fmt.Errorf("Application '%s' is a daemon, which isn't allowed to have a 'unity8' interface", app.Name)
 		}
-
-		/* Ensure that we're not a socket */
-		if app.Socket {
-			return fmt.Errorf("Application '%s' is a socket, which isn't allowed to have a 'unity8' interface", app.Name)
-		}
 	}
 
 	return nil
@@ -341,9 +340,13 @@ func (iface *Unity8Interface) SanitizeSlot(slot *interfaces.Slot) error {
 		panic(fmt.Sprintf("slot is not of interface %q", iface))
 	}
 
+	if slot.Snap.Type != "app" {
+		return fmt.Errorf("'unity8' slot must be on an application")
+	}
+
 	return nil
 }
 
-func (iface *Unity8Interface) AutoConnect() bool {
+func (iface *Unity8Interface) AutoConnect(*interfaces.Plug, *interfaces.Slot) bool {
 	return true
 }
