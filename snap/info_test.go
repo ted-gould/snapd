@@ -65,7 +65,6 @@ func (s *infoSuite) TestSideInfoOverrides(c *C) {
 		EditedDescription: "fixed desc",
 		Revision:          snap.R(1),
 		SnapID:            "snapidsnapidsnapidsnapidsnapidsn",
-		DeveloperID:       "deviddeviddeviddeviddeviddevidde",
 	}
 
 	c.Check(info.Name(), Equals, "newname")
@@ -73,7 +72,6 @@ func (s *infoSuite) TestSideInfoOverrides(c *C) {
 	c.Check(info.Description(), Equals, "fixed desc")
 	c.Check(info.Revision, Equals, snap.R(1))
 	c.Check(info.SnapID, Equals, "snapidsnapidsnapidsnapidsnapidsn")
-	c.Check(info.DeveloperID, Equals, "deviddeviddeviddeviddeviddevidde")
 }
 
 func (s *infoSuite) TestAppInfoSecurityTag(c *C) {
@@ -142,6 +140,7 @@ func makeTestSnap(c *C, yaml string) string {
 	snapSource := filepath.Join(tmp, "snapsrc")
 
 	err := os.MkdirAll(filepath.Join(snapSource, "meta"), 0755)
+	c.Assert(err, IsNil)
 
 	// our regular snap.yaml
 	err = ioutil.WriteFile(filepath.Join(snapSource, "meta", "snap.yaml"), []byte(yaml), 0644)
@@ -181,7 +180,7 @@ confinement: devmode`
 	c.Check(info.Type, Equals, snap.TypeApp)
 	c.Check(info.Revision, Equals, snap.R(0))
 	c.Check(info.Epoch, Equals, "1*")
-	c.Check(info.Confinement, Equals, snap.DevmodeConfinement)
+	c.Check(info.Confinement, Equals, snap.DevModeConfinement)
 }
 
 func (s *infoSuite) TestReadInfoFromSnapFileMissingEpoch(c *C) {
